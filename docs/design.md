@@ -162,7 +162,7 @@ what everyone writes first, and the local/entity distinction already comes from 
 
 ---
 
-## 8. Conditionals and priority cascades: D6 (Open, key decision)
+## 8. Conditionals and priority cascades: D6 (Decided: A, condition first)
 
 ### What a cascade is
 
@@ -273,9 +273,8 @@ Option C: nesting needs parentheses and gets hard to read quickly.
 | Reused elsewhere | same `cond -> value` arms as state machines (§13) and `latest()` | `when` could double as the action syntax | — |
 | New syntax | `->`, `else` | `when` | none |
 
-**Recommendation: A.** It handles long values and nesting best, and gives one arm shape across the
-language. B is a reasonable choice if you'd rather scan outputs than conditions. C remains
-available either way, for short one-liners.
+**Decided: A** (`cond -> value`). It handles long values and nesting best, and gives one arm shape
+across the language. Python's `x if c else y` remains available for short one-liners.
 
 ---
 
@@ -401,39 +400,171 @@ Alternatives: `between(22:00, 06:00)` (function form), or `after sunset and befo
 
 ---
 
-## 13. State machines (TEA `update`): D13 (Open)
+## 13. State machines (TEA `update`): D13 (Open, in discussion)
 
-For modes that cycle or reset themselves, which plain derived values can't express. A `state`
-is a named signal with an initial value and `event -> new value` transitions. Its value persists
-across restarts.
+### When you need one
 
-**Option A: transition list** (same `cond -> value` shape as cascades)
+Derived values (`=` bindings) can't remember *how they got here*. `since()`, `toggle()` and
+`latest()` cover simple memory ("pressed in the last 30 min", "last button wins"). A state
+machine is for anything with **more than one step of history**:
+
+- **Appliance cycles.** The washer drew power for a while, has now stopped, and nobody has opened
+  the door yet, so it's "done".
+- **One button cycling modes,** e.g. auto → boost → off → auto, where pressing again cancels.
+- **Modes that end themselves,** e.g. night mode until 07:00 on workdays, or until kitchen
+  motion after 05:00.
+- **Alarm-style sequences:** arming → armed → entry delay → triggered.
+
+In TEA terms, a state machine is the **model + `update`** and bindings are the **`view`**. Mode
+logic lives in the machine; what each device does lives in ordinary cascades that read it:
+
 ```python
-state bath_mode = "auto":
-    event.bath_remote.press                       -> "boost" if bath_mode == "auto" else "auto"
-    event.bath_remote.long_press                  -> "off"
-    bath_mode != "auto" for 1h                    -> "auto"      # hmm: a signal, see note
+fan.bathroom =
+    bath_mode == "boost"   -> on
+    bath_mode == "off"     -> off
+    else                   -> stuffy
 ```
 
-**Option B: explicit states, Harel-chart style**
+### D13a. Overall shape
+
+**Option A: per-state blocks** (recommended). Each state lists its outgoing transitions as
+`trigger -> target` arms, the same shape as cascades (D6). The first listed state is the initial
+state.
+
 ```python
-state bath_mode:
-    auto:
-        on event.bath_remote.press -> boost
-        on event.bath_remote.long_press -> off
-    boost (max 1h -> auto):
-        on event.bath_remote.press -> auto
-    off (max 1h -> auto):
-        on event.bath_remote.press -> auto
+state washer:
+    idle:
+        washer_power > 10 for 2min           -> running
+    running:
+        washer_power < 3 for 5min            -> done
+    done:
+        on enter: notify.mobile_app_phone(message: "Washing is done")
+        binary_sensor.washer_door turns on   -> idle
+        washer_power > 10 for 2min           -> running
 ```
 
-Note on A: transitions need events. A bool signal in event position should probably mean its
-rising edge (`… for 1h turns on`). Implicit, or a compile error asking you to write `turns on`?
-I lean towards an implicit rising edge **inside `state` blocks only**.
+**Option B: one transition table.** Compact for small machines, but it repeats state names and
+splits each state's behaviour across lines.
 
-The recommendation is **B** for anything with more than two states. Per-state timeouts
-(`max 1h`) are the most common need and B makes them obvious. Simple cases often don't need a
-state machine at all: `toggle()`, `latest()` and `since()` cover them.
+```python
+state washer = idle:
+    idle    -> running   when washer_power > 10 for 2min
+    running -> done      when washer_power < 3 for 5min
+    done    -> idle      when binary_sensor.washer_door turns on
+    done    -> running   when washer_power > 10 for 2min
+```
+
+**Option C: TEA-style reducer.** A flat list of `trigger -> new value` arms that guard on the
+current state explicitly. It's the most general (it's what the other two compile to), but the
+current-state guards make it noisy.
+
+```python
+state washer = "idle":
+    washer == "idle" and washer_power > 10 for 2min           -> "running"
+    washer == "running" and washer_power < 3 for 5min         -> "done"
+    washer == "done" and binary_sensor.washer_door turns on   -> "idle"
+    washer == "done" and washer_power > 10 for 2min           -> "running"
+```
+
+### D13b. What can trigger a transition
+
+| Trigger | Example | Semantics |
+|---|---|---|
+| Event | `remote.press`, `door turns on`, `at 07:00` | fires when the event happens while in this state |
+| Event + guard | `remote.press if night` | as above, only if the guard is true at that moment |
+| Condition (bool signal) | `washer_power < 3 for 5min` | **see below** |
+| Timeout | `after 1h` | time spent in the current state ≥ 1h (resets on every entry) |
+
+Condition triggers can be **level-triggered** (recommended) or **edge-triggered**:
+
+- **Level:** checked on entry to the state and whenever an input changes. It fires whenever the
+  condition is true while in that state. This is how SCXML/statecharts treat "eventless"
+  transitions. It's robust: if you enter `away` while someone is already home, `anyone_home ->
+  home` fires straight away.
+- **Edge:** fires only when the condition *becomes* true while in the state. This is simpler to
+  explain, but it misses conditions that were already true on entry or across a restart. Use
+  `turns on` explicitly when you mean an edge.
+
+`for` vs `after`: `washer_power < 3 for 5min` counts from when the power dropped, which may be
+before the state was entered. `after 5min` counts from entering the state.
+
+### D13c. Referring to states from outside
+
+| Option | Example |
+|---|---|
+| **A. String comparison** (recommended), checked at compile time against the declared states | `bath_mode == "boost"`, `bath_mode in ["boost", "off"]` |
+| B. A boolean per state | `bath_mode.boost` |
+| C. `is` with bare names | `bath_mode is boost` |
+
+A is consistent with how other string states are written (D3b). A typo like `"boots"` is still a
+compile error, because the machine's state set is known.
+
+The usual operators apply: `since(bath_mode becomes "boost")`, `held(bath_mode == "off")`,
+`bath_mode turns …` is an error (it's not a bool), `bath_mode becomes "done"` is an event.
+
+### D13d. Visibility in HA
+
+**Recommended: expose each machine as a `select` entity** (`select.ha_dsl_washer`). Its history
+graph then shows the mode over time, it can go on dashboards, and you can set it by hand from the
+UI. A manual selection counts as a transition, so it runs entry actions and restarts `after`
+timers. The machine's state is restored from this entity across restarts.
+
+Alternatives: a read-only `sensor`, or not exposed at all.
+
+### Proposed details (no decision needed unless you disagree)
+
+- **Shared transitions.** Arms written before the first state block apply in every state, and
+  are checked before the state's own arms:
+  ```python
+  state bath_mode:
+      remote.long_press       -> off          # from any state
+      auto:
+          remote.press        -> boost
+      boost:
+          remote.press        -> auto
+          after 1h            -> auto
+      off:
+          remote.press        -> auto
+          after 2h            -> auto
+  ```
+- **First match wins** when several transitions are enabled at once, as in cascades.
+- **Entry and exit actions:** `on enter:` / `on exit:` blocks inside a state, using the action
+  syntax (D14).
+- **`-> back`** returns to the previous state. That's useful for interruptions like "movie mode".
+- **Chains:** after a transition, level conditions are re-checked in the new state. A chain of
+  more than 10 transitions in one step is a runtime error, and the machine stops. A level
+  condition that targets its own state is a compile error, because it would loop. Events may
+  re-enter the same state, which restarts its `after` timers.
+- **Reload:** when a rules file is edited, the machine keeps its current state if that state
+  still exists. Otherwise it resets to the initial state, with a log message.
+- **Deferred to v2:**
+  - nested (hierarchical) states;
+  - extended state, i.e. variables stored alongside the mode, like a counter or remembered
+    brightness.
+
+### Larger example
+
+```python
+state house:
+    home:
+        not anyone_home for 10min                 -> away
+        input_button.goodnight                    -> night
+        input_button.movie                        -> movie
+    away:
+        anyone_home                               -> home
+    night:
+        at 07:00 if workday                       -> home
+        at 09:00                                  -> home
+        kitchen_motion if now in 05:00..07:00     -> home
+    movie:
+        input_button.movie                        -> back
+        after 4h                                  -> back
+
+light.living =
+    house == "movie"   -> on(brightness: 5%)
+    house == "night"   -> off
+    else               -> since(living_motion) < 10min
+```
 
 ---
 
@@ -604,7 +735,7 @@ on humidity > 90% for 30min turns on:
 | D3 | Attributes / string states | Proposed | `entity.attr`; quoted strings, `on`/`off` keywords |
 | D4 | Units & literals | Proposed | `5min`, `50%`, `22:00`, `sunset - 30min` |
 | D5 | Binding operator & targets | Proposed | `=`, per-domain writers, `on(attr: …)`, `keep` |
-| D6 | Priority cascades | **Open (key)** | condition-first `cond -> value` (see §8 examples) |
+| D6 | Priority cascades | **Decided** | condition-first `cond -> value` |
 | D7 | Event sources | Proposed | table in §9 |
 | D8 | Event-type filter | Open | `event.remote.double_press` |
 | D9 | Edge syntax | Proposed | `turns on`, `becomes`, `leaves`, `changes()` |
@@ -613,7 +744,7 @@ on humidity > 90% for 30min turns on:
 | D10c | `held(S)` alongside `for` | Open | keep `for`, add `held()` |
 | D11 | Temporal ops | Proposed | `for`, `until`, `debounce`, `min_on` |
 | D12 | Time windows | Proposed | `now in 22:00..06:00` |
-| D13 | State machines | Open | explicit states with per-state `max` timeouts |
+| D13 | State machines | **Open (in discussion)** | per-state blocks, level-triggered conditions, `after D`, exposed as `select` |
 | D14 | Actions | Proposed | `on E:` + service calls, no sleeps |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `since(manual(x)) < D -> keep` |
 | D16 | Unknown handling | Proposed | Kleene logic, unknown → keep |
