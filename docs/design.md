@@ -40,7 +40,7 @@ directly means no code generation, no `exec`, and errors that carry the user's f
 numbers for free.
 
 **Why persist our own timestamps?** After an HA restart, `last_changed` is reset to the boot
-time for most entities. That would make `motion within 1h` or `door off for 10min` wrong right
+time for most entities. That would make `since(motion) < 1h` or `door off for 10min` wrong right
 after a restart. `input_button.*` and `event.*` entities keep their timestamps in their state, but
 nothing else does reliably. So the runtime records the transition times it cares about and
 persists them.
@@ -71,20 +71,19 @@ Plus **state machines** (`state x = …`, §11), which are named signals updated
 Value types: `bool`, `number`, `string`, `duration`, `time-of-day`, `event`. Every type except
 `event` can also be `unknown`. There are no implicit conversions between signals and events.
 Using an event where a signal is expected is a compile error with a hint, e.g.
-*"`input_button.boost` is an event; did you mean `input_button.boost within 30min`?"*
+*"`input_button.boost` is an event; did you mean `since(input_button.boost) < 30min`?"*
 
 ---
 
-## 4. Grammar base: **D1 (Proposed)**
+## 4. Grammar base: **D1 (Decided)**
 
-| Option | Example | Pros | Cons |
-|---|---|---|---|
-| **A. Python-flavoured custom grammar** | `boost within 30min` | Full control. We can have `within`, `for`, `5min`, `50%`, `22:00`, `->`. Keeps Python's look. | We write the parser (small: Pratt parser for expressions plus an indentation lexer). Editor highlighting only approximate at first. |
-| B. Strict Python syntax + token pre-pass | `within(boost, 30*min)` | Free parser (`ast`), Python highlighting. | Every nice form needs a hack in the pre-pass, or ends up as a function call. |
+A **custom, Python-flavoured grammar** with our own parser: a Pratt parser for expressions plus an
+indentation-aware lexer. It looks like Python (`and`/`or`/`not`, `x if c else y`, indentation)
+but adds what Python can't express: `5min`, `50%`, `22:00`, `for`, `until`, `->`, `turns on`.
 
-**Recommendation: A.** The main appeal of the DSL is the event and temporal vocabulary, which
-Python's grammar can't express. A hand-written parser also gives the best error messages.
-We can ship a VS Code / TextMate grammar later.
+Rejected: strict Python syntax parsed with `ast` plus a token pre-pass. Every temporal form would
+need a pre-pass hack or turn into a function call. A hand-written parser also gives better error
+messages. We can ship a VS Code / TextMate grammar later.
 
 ---
 
@@ -165,41 +164,118 @@ what everyone writes first, and the local/entity distinction already comes from 
 
 ## 8. Conditionals and priority cascades: D6 (Open, key decision)
 
-Most real rules are a priority list: "boost button wins, then the window being open, then air
-quality". This deserves first-class syntax. Python's `x if c else y` remains available for
-short cases.
+### What a cascade is
 
-**Option A: condition first** (like Haskell guards or a match)
+Most real rules are a **priority list**: several reasons a device might be on or off, where some
+reasons beat others. "If the boost button was pressed recently, the fan is on, no matter what.
+Otherwise, if the window is open, it's off. Otherwise, it follows the air quality."
+
+Semantically this is just nested `if`/`else`, so Python's `x if c else y` already expresses it.
+The question is only whether to add **dedicated layout** for it, because it's the shape almost
+every non-trivial rule takes. Whatever layout we choose:
+
+- **First match wins.** Lines are checked top to bottom.
+- **There must be a final fallback** (`else`), or it's a compile error.
+- **Values can be anything:** `on`/`off`, numbers, `on(brightness: …)`, `keep`, or another
+  expression or cascade.
+- **The cascade is one expression,** re-evaluated whenever any input changes. The binding writes
+  when the result changes. That includes moving from one line to another, e.g. when a
+  higher-priority condition stops being true.
+- **Temporary overrides fall out naturally.** An override is a high-priority line whose
+  condition turns false on its own over time, like `since(remote.press) < 30min`. When it
+  expires, the next line takes over and the device re-syncs. No timers, no "restore previous
+  state" logic.
+- An `unknown` condition falls through to the next line (D16).
+
+### The options, on three real rules
+
+**Rule 1: bathroom fan.** On/off, with an override at the top.
+
+Option A, condition first (`cond -> value`):
 ```python
 fan.bathroom =
-    boost within 30min       -> on
-    window.bathroom          -> off
-    else                     -> stuffy
+    since(remote.press) < 30min    -> on
+    window                         -> off
+    else                           -> stuffy
 ```
-
-**Option B: value first**
+Option B, value first (`value when cond`):
 ```python
 fan.bathroom =
-    on      when boost within 30min
-    off     when window.bathroom
+    on       when since(remote.press) < 30min
+    off      when window
     stuffy
 ```
-
-**Option C: chained `if`/`else` only** (pure Python, no new syntax)
+Option C, plain Python ternaries (no new syntax):
 ```python
-fan.bathroom = (on if boost within 30min
-                else off if window.bathroom
+fan.bathroom = (on if since(remote.press) < 30min
+                else off if window
                 else stuffy)
 ```
 
-Rules for A and B: branches are checked top to bottom and the first true one wins. A missing
-final `else` is a compile error, unless we make the fallback `keep`. An `unknown` condition
-falls through to the next branch. (Alternatively it could make the whole result `unknown`;
-see D16.)
+**Rule 2: thermostat setpoint.** Number output, five levels.
 
-**Recommendation: A.** It reads as "if … then …", lines up nicely, and the same `cond -> value`
-shape is reused for state machines (§11) and `latest()` (§10). B is nice for short lists of
-outputs.
+Option A:
+```python
+climate.living.temperature =
+    window.living                        -> 7          # frost protection only
+    not anyone_home for 2h               -> 15
+    since(input_button.warm_up) < 2h     -> 22
+    now in 23:00..06:30                  -> 17
+    else                                 -> 20.5
+```
+Option B:
+```python
+climate.living.temperature =
+    7       when window.living
+    15      when not anyone_home for 2h
+    22      when since(input_button.warm_up) < 2h
+    17      when now in 23:00..06:30
+    20.5
+```
+Option C:
+```python
+climate.living.temperature = (7 if window.living
+                              else 15 if not anyone_home for 2h
+                              else 22 if since(input_button.warm_up) < 2h
+                              else 17 if now in 23:00..06:30
+                              else 20.5)
+```
+
+**Rule 3: hall light.** Long values, `keep`, and a nested decision.
+
+Option A (nesting is natural, since a value can itself be a cascade):
+```python
+light.hall =
+    since(manual(light.hall)) < 1h    -> keep
+    since(motion) < 5min              ->
+        night                         -> on(brightness: 10%, kelvin: 2200)
+        else                          -> on(brightness: 100%)
+    else                              -> off
+```
+Option B (long values push the conditions far right, and nesting reads awkwardly):
+```python
+light.hall =
+    keep                                when since(manual(light.hall)) < 1h
+    on(brightness: 10%, kelvin: 2200)   when since(motion) < 5min and night
+    on(brightness: 100%)                when since(motion) < 5min
+    off
+```
+Option C: nesting needs parentheses and gets hard to read quickly.
+
+### Trade-offs
+
+| | A: `cond -> value` | B: `value when cond` | C: ternaries only |
+|---|---|---|---|
+| Reads as | "if X then Y" (like `match`, Haskell guards) | "Y if X" (like Python's ternary, SQL `CASE`) | Python |
+| Scanning **outputs** | values in a ragged right column | values aligned on the left, easy to scan | hard |
+| Long values (`on(brightness: …)`) | fine | push the conditions off to the right | fine |
+| Nesting | natural | awkward | parentheses |
+| Reused elsewhere | same `cond -> value` arms as state machines (§13) and `latest()` | `when` could double as the action syntax | — |
+| New syntax | `->`, `else` | `when` | none |
+
+**Recommendation: A.** It handles long values and nesting best, and gives one arm shape across the
+language. B is a reasonable choice if you'd rather scan outputs than conditions. C remains
+available either way, for short one-liners.
 
 ---
 
@@ -235,46 +311,38 @@ any change. Rejected alternatives: `rises(x)`/`falls(x)` (jargon), `↑x` (can't
 
 ---
 
-## 10. Events → signals: recency (D10, Open, key decision)
+## 10. Events → signals: recency (D10, Decided: age comparison)
 
-This is the "was the button pressed within the last hour" feature.
+This is the "was the button pressed within the last hour" feature. The primitive is
+**`since(x)`, a duration signal**:
 
-**Option A: infix `within`** (recommended)
+| `since(…)` of | Value |
+|---|---|
+| an event `E` | time since E last happened. Infinite if it never has, so `since(E) < D` is false. |
+| a bool signal `S` | time since S was last true. `0` while S is true. Infinite if never true. |
+
 ```python
-boost_active = input_button.boost within 30min
-fan.bathroom =
-    input_button.boost within 30min  -> on
-    else                             -> stuffy
+boost_active = since(input_button.boost) < 30min      # pressed in the last 30 min
+light.hall   = since(motion) < 10min                  # motion now, or in the last 10 min
+stale        = since(changes(sensor.co2)) > 1h        # sensor stopped reporting
+long_open    = since(door turns on) > 2h and door     # door opened >2h ago and still open
 ```
 
-**Option B: functions**
-```python
-boost_active = recent(input_button.boost, 30min)
-```
+Because `since(S)` is `0` while `S` is true, the classic "on during motion and for 10 minutes
+after" is just `since(motion) < 10min`.
 
-**Option C: age comparison**
-```python
-boost_active = since(input_button.boost) < 30min
-boost_active = input_button.boost.ago < 30min
-```
+**D10b (Open): also allow a `.ago` suffix?** `input_button.boost.ago < 30min` reads nicely, but:
+- it collides with attribute syntax: `light.hall.ago` looks like an attribute called `ago`;
+- expressions need parentheses: `(door turns on).ago`.
 
-**Option D: natural language**
-```python
-boost_active = input_button.boost happened in the last 30min
-```
+Recommendation: `since()` only, at least for v1.
 
-The recommendation is **A**, with `since(E)` (a duration signal, infinite if never) as the
-general form underneath. `since` covers the rarer cases, e.g. `since(door turns on) > 2h`.
+**D10c (Open): spell `for` the same way?** The mirror image of `since` is `held(S)`: how long S
+has been continuously true (`0` while false). Then `co2 > 800 for 5min` could be written
+`held(co2 > 800) >= 5min`. Recommendation: keep `for` as the everyday form, since it's very
+common and reads well, and offer `held()` for unusual comparisons.
 
-**`within` also applies to signals,** which gives a pair of operators with mirrored meanings:
-
-| | Event `E` | Bool signal `S` |
-|---|---|---|
-| `X within D` | E happened in the last D | S was true **at some point** in the last D |
-| `X for D` | (error) | S has been true **the whole** last D |
-
-So `motion within 10min` means "motion now, or it ended less than 10 minutes ago". That is the
-standard "lights stay on 10 minutes after motion" rule.
+The timestamps are tracked and persisted by the runtime (§2), so they survive restarts.
 
 Other event→signal combinators:
 
@@ -282,7 +350,7 @@ Other event→signal combinators:
 |---|---|
 | `toggle(E, initial: off)` | flips on each occurrence |
 | `latest(E1 -> v1, E2 -> v2, initial: v0)` | value from whichever event happened most recently |
-| `count(E within 10min)` | number of occurrences in the window, e.g. triple-press detection |
+| `count(E, 10min)` | number of occurrences in the last 10 min, e.g. triple-press detection |
 | `hold(E)` | the last event's payload, e.g. its `event_type` |
 
 All of these persist across restarts.
@@ -294,7 +362,7 @@ All of these persist across restarts.
 ```python
 light.porch = lux < 20 for 5min                        # true only after 5 min continuous
 fan.bedroom = co2 > 800 until co2 < 700                # latch: hysteresis / deadband
-light.hall  = motion within 10min                      # true now or recently
+light.hall  = since(motion) < 10min                    # true now or recently (§10)
 ```
 
 - **Debounce** (the output must be stable for D before it's written):
@@ -365,7 +433,7 @@ I lean towards an implicit rising edge **inside `state` blocks only**.
 
 The recommendation is **B** for anything with more than two states. Per-state timeouts
 (`max 1h`) are the most common need and B makes them obvious. Simple cases often don't need a
-state machine at all: `toggle()`, `latest()` and `within` cover them.
+state machine at all: `toggle()`, `latest()` and `since()` cover them.
 
 ---
 
@@ -387,37 +455,39 @@ error), which prevents fights. There's no `sleep`/`wait` in v1: if you need dela
 
 ---
 
-## 15. Manual control and overrides: D15 (Open, key decision)
+## 15. Manual control and overrides: D15 (Decided: edge-triggered default)
 
-What happens when a human changes a device that a binding drives?
+When a human changes a device that a binding drives, **the change sticks until the binding's
+computed value next changes.** The binding writes only on changes to its own result, so it never
+fights a manual change in between. This is simple and predictable, but "the next change" might be
+seconds or days away.
 
-**Option A: edge-triggered (spike behaviour, recommended default).** The binding writes only
-when its computed value changes. A manual change sticks until the next flip of the expression.
-That's simple and predictable, but "the next flip" might be seconds or days away.
-
-**Option B: timed back-off by default.** After a manual change, the binding yields for a
-default period (e.g. 1h), then re-syncs.
-
-**Option C: always enforce.** It's re-asserted immediately. Rarely what you want for
-lights and fans, but right for, say, a pump.
-
-Whatever the default, explicit control is spelled with events and `keep` (no new concepts):
+For a time limit, the override is written with events and `keep` (no new concepts):
 
 ```python
 fan.bathroom =
-    manual(fan.bathroom) within 1h  -> keep      # yield for an hour after a manual change
-    else                            -> stuffy
+    since(manual(fan.bathroom)) < 1h  -> keep      # yield for an hour after a manual change
+    else                              -> stuffy
 ```
 
-…plus sugar for the common cases:
+…with sugar for the common cases:
 ```python
 with override 1h:            # same as above, for every binding in the block
     fan.bathroom = stuffy
-with override never:         # option C for this block
+with override never:         # re-assert immediately (e.g. pumps, safety rules)
     switch.pump = pressure < 2
 ```
 
-`manual(target)` is the one allowed self-reference, so it's exempt from cycle detection.
+When the hour is up, the `keep` line stops matching. The binding's value changes, so it writes
+and the device re-syncs.
+
+`manual(target)` is the one allowed self-reference, so it's exempt from cycle detection. Manual
+changes are detected with HA `Context`: any change to the entity whose context wasn't created by
+ha_dsl counts as manual.
+
+Rejected alternatives:
+- a timed back-off by default, because it surprises you when you forget it's there;
+- always enforcing by default, because it's wrong for lights and fans.
 
 ---
 
@@ -428,7 +498,7 @@ with override never:         # option C for this block
 - Fallbacks: `co2 ?? 0`, or `available(sensor.co2)` as an explicit test.
 - In cascades, an `unknown` condition falls through to the next branch. (Proposed. The
   alternative is to make the whole result `unknown`, which is safer but brittle.)
-- `S for D` treats an `unknown` period as breaking the run. `S within D` ignores it.
+- `S for D` treats an `unknown` period as breaking the run. `since(S)` ignores it.
 
 ---
 
@@ -438,7 +508,7 @@ with override never:         # option C for this block
 - Write only where the result differs from the **persisted last-written value**. A restart is
   then a no-op unless the inputs changed while HA was down, and it doesn't undo manual changes
   made before the restart.
-- Timers (`for`, `within`, debounce, state timeouts) resume from persisted timestamps.
+- Timers (`for`, `since`, debounce, state timeouts) resume from persisted timestamps.
 
 ---
 
@@ -466,7 +536,7 @@ compile-time macros, with no runtime cost. Leaving this out of v1 is fine.
   would make instead of making them.
 - **`ha_dsl.explain`** service: given a target, it reports the current value of each
   subexpression and which cascade branch is active ("fan.bathroom is ON because
-  `boost within 30min` (pressed 12 min ago)").
+  `since(remote.press) < 30min` (pressed 12 min ago)").
 - Optional diagnostic sensor per binding, whose attributes hold the active branch and reason.
 - Service calls carry a `Context` that HA's logbook attributes to ha_dsl and the rule's
   file:line.
@@ -482,7 +552,7 @@ compile-time macros, with no runtime cost. Leaving this out of v1 is fine.
 | `or` | |
 | `and` | |
 | `not` | |
-| `within`, `for`, `until`, `debounced` (temporal postfix) | `not boost within 30min` = `not (boost within 30min)` |
+| `for`, `until`, `debounced` (temporal postfix) | `not motion for 5min` = `not (motion for 5min)` |
 | `turns on`, `becomes`, `leaves` (edges) | `co2 > 800 turns on` = `(co2 > 800) turns on` |
 | `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`, `??` | |
 | `+`, `-` | |
@@ -508,15 +578,15 @@ night  = now in 22:00..07:00
 
 with override 1h:
     fan.bathroom =
-        remote.press within 30min        -> on          # temporary boost
-        remote.long_press within 2h      -> off         # temporary silence
+        since(remote.press) < 30min      -> on          # temporary boost
+        since(remote.long_press) < 2h    -> off         # temporary silence
         window                           -> off
         night and not humidity > 85%     -> off
         else                             -> stuffy
 
 light.bathroom =
-    binary_sensor.bathroom_motion within 5min -> on(brightness: 10% if night else 100%)
-    else                                      -> off
+    since(binary_sensor.bathroom_motion) < 5min -> on(brightness: 10% if night else 100%)
+    else                                        -> off
 
 on humidity > 90% for 30min turns on:
     notify.mobile_app_phone(message: "Bathroom still very humid. Window open?")
@@ -526,24 +596,26 @@ on humidity > 90% for 30min turns on:
 
 ## 22. Decision log
 
-| ID | Topic | Status | Current recommendation |
+| ID | Topic | Status | Decision / current recommendation |
 |---|---|---|---|
 | D0 | Name / file extension | Open | — |
-| D1 | Grammar base | Proposed | custom Python-flavoured grammar |
+| D1 | Grammar base | **Decided** | custom Python-flavoured grammar, own parser |
 | D2 | Entity refs & aliases | Proposed | full ids + definitions as aliases; dotted = entity |
 | D3 | Attributes / string states | Proposed | `entity.attr`; quoted strings, `on`/`off` keywords |
 | D4 | Units & literals | Proposed | `5min`, `50%`, `22:00`, `sunset - 30min` |
 | D5 | Binding operator & targets | Proposed | `=`, per-domain writers, `on(attr: …)`, `keep` |
-| D6 | Priority cascades | **Open (key)** | condition-first `cond -> value` |
+| D6 | Priority cascades | **Open (key)** | condition-first `cond -> value` (see §8 examples) |
 | D7 | Event sources | Proposed | table in §9 |
 | D8 | Event-type filter | Open | `event.remote.double_press` |
 | D9 | Edge syntax | Proposed | `turns on`, `becomes`, `leaves`, `changes()` |
-| D10 | Recency syntax | **Open (key)** | `E within 30min`, `since(E)` underneath |
-| D11 | Temporal ops | Proposed | `for`, `within`, `until`, `debounce`, `min_on` |
+| D10 | Recency syntax | **Decided** | age comparison: `since(E) < 30min`; `since(S)` for signals |
+| D10b | `.ago` alias | Open | not in v1 |
+| D10c | `held(S)` alongside `for` | Open | keep `for`, add `held()` |
+| D11 | Temporal ops | Proposed | `for`, `until`, `debounce`, `min_on` |
 | D12 | Time windows | Proposed | `now in 22:00..06:00` |
 | D13 | State machines | Open | explicit states with per-state `max` timeouts |
 | D14 | Actions | Proposed | `on E:` + service calls, no sleeps |
-| D15 | Manual-override default | **Open (key)** | edge-triggered default + `with override D` |
+| D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `since(manual(x)) < D -> keep` |
 | D16 | Unknown handling | Proposed | Kleene logic, unknown → keep |
 | D17 | Startup | Proposed | write only if different from persisted last value |
 | D18 | Abstraction | Open (v2) | compile-time templates |
