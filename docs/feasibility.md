@@ -1,5 +1,9 @@
 # Feasibility: reactive DSL → Home Assistant
 
+> **Superseded direction:** we've since decided on a custom integration (installed via HACS) that
+> watches rule files and compiles a custom DSL on the fly. See [`design.md`](design.md). This doc
+> remains as the record of the feasibility work and the pyscript/AppDaemon/library comparison.
+
 **Verdict: feasible, and a plain Python library works. No transpiler is needed.** The core idea
 (`fan.bath = (sensor.co2 > 800) | (sensor.humidity > 50)`, kept in sync on every transition) runs
 as an embedded DSL using operator overloading. The library approach changes which runtime to host
