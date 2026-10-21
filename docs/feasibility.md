@@ -1,109 +1,153 @@
 # Feasibility: reactive DSL → Home Assistant
 
-**Verdict: feasible.** The core idea (`fan.bath = sensor.co2 > 800 or sensor.humidity > 50`,
-kept in sync on every transition) compiles to a small amount of pyscript. The parts that take
-real work are the semantics around the core: unknown states, manual overrides, hysteresis, time,
-and events. Parsing and code generation are not where the effort goes.
+**Verdict: feasible, and a plain Python library works. No transpiler is needed.** The core idea
+(`fan.bath = (sensor.co2 > 800) | (sensor.humidity > 50)`, kept in sync on every transition) runs
+as an embedded DSL using operator overloading. The library approach changes which runtime to host
+it on: pyscript can't evaluate it (see §3).
 
-## 1. Syntax: reuse Python's parser
+## 1. Library approach (current direction): `spike/library/`
 
-`ast.parse` already accepts the important forms:
+```python
+from ha_dsl import *
 
-| Snippet | Parses? |
-|---|---|
-| `fan.bath = sensor.co2 > 800 or sensor.humidity > 50` | ✅ entity refs are plain attribute access |
-| `light.hall.brightness = 255 if binary_sensor.motion else 0` | ✅ attribute targets |
-| `fan.x = sensor.t > 25 and not input_boolean.guest` | ✅ |
-| `light.hall = held(binary_sensor.motion, minutes=5)` | ✅ function form |
-| `sensor.humidity > 50%`, `5min` | ❌ needs a small token pre-pass for unit suffixes |
-| `light.hall = motion for 5 min`, `22:00 < now < 06:00` | ❌ use the function form (`held(...)`, `between(...)`) or a pre-pass |
-
-**Why a transpiler rather than an embedded Python DSL?** Python cannot overload `and`, `or`,
-`not` or `x if c else y`. That makes `co2 > 800 or humidity > 50` impossible to capture as a
-lazy expression with operator overloading. An AST rewrite gets it with no extra syntax.
-
-## 2. Runtime target: pyscript
-
-A subagent compared pyscript and AppDaemon in detail. Its recommendation is **pyscript**, with
-**thin generated code over a hand-written runtime library**:
-
-- **pyscript runs inside HA.** State reads are synchronous, `Context` propagates correctly (needed
-  for override detection), there is no long-lived token or extra container, and it installs via
-  HACS on every HA install type.
-- **Its features cover v1.** Dynamic "trigger closures", `state_hold`, `@time_trigger("startup")`,
-  `@time_active` and automatic hot-reload are all there. It has active 2026 releases
-  (2.1.0, Aug 2026, HA 2026.5+).
-- **AppDaemon's advantages.** It runs real CPython. Running as a dedicated HA user makes
-  "the DSL did this" trivial to detect from `context.user_id`. **Its drawbacks:** it runs in a
-  separate process, so its state cache lags its own writes. It also restarts every app on a
-  reconnect, and releases are slower (last release Jan 2026).
-- **pyscript risks.**
-  - It runs a Python subset (no generators, no `match`), interpreted and slower than CPython.
-  - A blocking call freezes all of HA.
-  - The maintainer team is small, and the 2.x decorator rewrite brought regressions. Pin versions.
-  - Its test fixture is not a public API.
-- **Long term.** A custom HA integration ("pyscript without the interpreter", using HA's own
-  `async_track_template_result`, `RestoreEntity` and the official pytest harness) is likely the
-  best eventual home. **So keep the runtime's core host-agnostic.**
-- **Native YAML automations** work for the trivial case but turn into helper-entity sprawl once
-  overrides and cross-rule state appear.
-
-## 3. Spike (`spike/`)
-
-`spike/compile.py` handles `entity = expr` bindings:
-
-- It rewrites entity refs to `_val("...")` calls.
-- It extracts the dependencies statically.
-- It rejects double bindings and self-dependency.
-- It emits one pyscript rule per binding: an any-change `@state_trigger` on the inputs, plus
-  `@time_trigger("startup")`.
-
-`spike/simulate.py` runs the output in plain Python against a fake HA. Run it with
-`python3 spike/simulate.py`:
-
-```
-      sensor.co2 = unavailable  -> (nothing)
-      sensor.co2 = 600          -> (nothing)
- sensor.humidity = 40           -> turn_off(fan.bathroom)
-      sensor.co2 = 900          -> turn_on(fan.bathroom)
-    fan.bathroom = off          -> (nothing)        # human override respected
-      sensor.co2 = 950          -> (nothing)        # result unchanged, no write
-      sensor.co2 = 700          -> turn_off(fan.bathroom)
- sensor.humidity = 65           -> turn_on(fan.bathroom)
+fan.bathroom = (sensor.co2 > 800) | (sensor.humidity > 50 * percent)
+fan.bedroom  = (sensor.co2 > 800).until(sensor.co2 < 700)      # deadband / hysteresis
+light.porch  = (sensor.lux < 20).for_(5 * minutes)             # must hold for 5 min
+with debounce(2 * minutes):                                    # applies to every binding inside
+    switch.dehumidifier = sensor.humidity > 60
+light.hall.brightness = when(binary_sensor.motion, 255, 0)     # attribute target
 ```
 
-## 4. Design questions to settle before building for real
+How the spike works:
 
-1. **Level vs edge semantics.** The spike is edge-triggered: it writes only when the expression's
-   result flips. A manual override therefore lasts until the next flip. Alternatives:
-   - back off for a fixed time after a human change;
-   - re-assert continuously (level-triggered).
+- **Bindings.** `fan`, `sensor`, … are domain proxies. `fan.bathroom = expr` goes through
+  `__setattr__` and registers a binding. Expressions build a signal graph at import time.
+- **Runtime.** A host-agnostic `Runtime` re-evaluates a binding when one of its input entities
+  changes or a timer it asked for fires. It writes only when the result changes (edge-triggered,
+  so manual overrides persist).
+- **Unknown inputs.** It uses three-valued logic: `True | UNKNOWN` is `True`, while
+  `UNKNOWN & True` holds the target.
 
-   Override detection needs `Context` id tracking (pyscript) or a dedicated user (AppDaemon).
-2. **Unknown/unavailable inputs.** The spike gets partial Kleene logic for free: `True or <unknown>`
-   short-circuits. However, `<unknown> or True` raises and holds the target. The runtime should do
-   proper three-valued evaluation, either by wrapping `and`/`or`/comparisons during the AST rewrite
-   or by evaluating in the runtime.
-3. **Startup.** Should rules assert their value at boot? The spike does, which can clobber a
-   pre-restart manual state.
-4. **Time.**
-   - Debounce (`held(x, minutes=5)`) and hysteresis (`latch(on=co2 > 800, off=co2 < 700)`)
-     are stateful operators and need runtime support.
-   - Time windows (`between("22:00", "06:00")`) need scheduled wake-ups at the boundaries, not
-     just state triggers.
-5. **Non-boolean targets.** Brightness, setpoints and covers need per-domain writers that map a
-   value to a service call. Read-only entities (sensors) as targets could become virtual entities
-   via `state.set`.
-6. **Events and the TEA part.** Button presses and scene triggers are not derived state. They need
-   an imperative or `update(msg, model)` escape hatch, or first-class modes/state machines whose
-   current state is itself an input to bindings.
-7. **Static checks.**
-   - Cycles across rules.
-   - Multiple writers to one entity.
-   - Unknown entity ids, checked against an exported entity list.
-   - Map errors back to source lines via `# source line N` comments.
+`python3 spike/library/demo.py` runs these rules against a fake HA with a simulated clock:
+
+```
+12:00  sensor.co2 = unavailable     -> (nothing)
+12:00  sensor.humidity = 65         -> turn_on(fan.bathroom)       # True | UNKNOWN
+12:00  sensor.co2 = 750             -> turn_off(fan.bedroom)
+12:00  sensor.co2 = 850             -> turn_on(fan.bedroom)
+12:00  fan.bathroom = off           -> (nothing)                   # manual override kept
+12:00  sensor.co2 = 750             -> (nothing)                   # bedroom: inside deadband
+12:00  sensor.co2 = 650             -> turn_off(fan.bedroom)
+12:00  sensor.lux = 10              -> turn_off(light.porch)
+12:03  +0:03:00                     -> turn_on(switch.dehumidifier)  # debounced 2 min
+12:06  +0:03:00                     -> turn_on(light.porch)          # held 5 min
+12:06  binary_sensor.motion = on    -> set(light.hall.brightness=255)
+```
+
+### Syntax: what Python allows
+
+| Wanted | Works? | Use instead |
+|---|---|---|
+| `a \| b`, `a & b`, `~a` | ✅ | |
+| `5.minutes`, `750.debounce(50)` | ❌ `5.m` is a malformed float literal, and `int` can't be monkeypatched | `5 * minutes`. `minutes` is a `timedelta`, so this is real duration arithmetic. |
+| `50%` / `50.percent` | ❌ | `50 * percent`, or just `50` |
+| `and` / `or` / `not` / `x if c else y` | ❌ not overloadable | `&`, `\|`, `~`, `when(c, x, y)` |
+| `sensor.mode in ("a", "b")` | ❌ `in` always returns a plain bool | a method, e.g. `sensor.mode.is_in("a", "b")` |
+| `with debounce(...)` / `with min_on(...)` | ✅ | |
+
+On debounce syntax, two different things are usually meant, and both read well as methods on the
+condition rather than on the number:
+
+- **Time:** `(sensor.co2 > 750).for_(5 * minutes)` means "true once it has been true for 5 min".
+  Use `with debounce(...)` for symmetric settling of a binding's output.
+- **Value (deadband):** `(sensor.co2 > 800).until(sensor.co2 < 700)` means "on above 800,
+  off below 700". A more compact alternative that is also possible:
+  `sensor.co2 > deadband(750, 50)`, where `Signal.__gt__` recognises the deadband object.
+
+### The big hazard: precedence, and how the library catches it
+
+`&` and `|` bind tighter than `>`. So `sensor.co2 > 800 | sensor.humidity > 50` silently means
+`co2 > (800 | humidity) > 50`, and every comparison needs parentheses (the same gotcha pandas has).
+The spike catches every variant it tried at load time:
+
+- **`__bool__` raises with a helpful message.** That catches `and`, `or`, `not`, `if` and
+  chained comparisons.
+- **`&`, `|`, `~` reject numeric operands.** That catches `binary_sensor.motion | sensor.lux < 20`,
+  which isn't a chained comparison, so it would otherwise be silently wrong.
+- **Bindings are checked.** Self-dependency and double binding are rejected.
+
+### Trade-offs vs a transpiler
+
+Library pros:
+- No compiler to build.
+- Real tracebacks pointing at the user's own lines.
+- Ordinary Python for abstraction, e.g. loops and functions that generate rules per room.
+- Entity typos can be caught by a type checker or IDE, using a stub generated from HA's entity list.
+
+Library cons:
+- Mandatory parentheses, `~`/`when()` instead of `not`/`if`, `5 * minutes`.
+- Magic proxies: any attribute assignment on an entity is a binding. The spike hit this once
+  internally (an innocent `x.kind = …` created a stray rule). Keep library internals off those
+  objects.
+
+## 2. Alternative considered: transpiler (`spike/transpiler/`)
+
+`ast.parse` accepts `fan.bath = sensor.co2 > 800 or sensor.humidity > 50` directly. Rewriting the
+AST gives you `and`/`or`/`not`/`if` without parentheses, but you have to build a compiler and map
+errors back to source lines. `spike/transpiler/compile.py` emits one pyscript `@state_trigger`
+rule per binding, and `simulate.py` runs it against a fake HA. The library spike now covers
+everything this one does.
+
+## 3. Runtime host
+
+A subagent compared pyscript and AppDaemon, assuming generated code. It preferred **pyscript**:
+- it runs in-process, with synchronous reads and `Context` propagation for override detection;
+- it installs from HACS and reloads automatically;
+- it has active 2026 releases (2.1.0, Aug 2026).
+
+AppDaemon runs real CPython, but in a separate process whose state cache lags its own writes, and
+it restarts every app on a reconnect.
+
+**The library approach changes this.** pyscript runs `.py` files through its own AST interpreter,
+and that interpreter collapses every comparison to a plain bool. `ast_compare` in
+`custom_components/pyscript/eval.py` does `if not val: return False … return True`. So
+`sensor.co2 > 800` can never yield a signal object inside a pyscript file; with this library it
+raises the `__bool__` error. (`|`, `&` and attribute assignment do go through normal Python
+semantics when `fan`/`sensor` are bound names.)
+
+Options, in order of preference:
+
+1. **Custom HA integration.**
+   - Runs real CPython inside HA's event loop.
+   - Can use HA's own `async_track_state_change_event` / `async_track_point_in_time` for the host
+     adapter, plus native `Context`, `RestoreEntity` (to persist latch/override state) and the
+     official pytest harness.
+   - Cost: loading and reloading the rules file and reporting errors are ours to build.
+   - Recommended target.
+2. **AppDaemon app.** Real CPython; the rules file is just an app. It's the fastest way to try the
+   library against a real HA, with the process-separation caveats above.
+3. **pyscript with the rules in a native module.** The rules go in a real Python module imported
+   with `allow_all_imports`, and the pyscript file is a thin host adapter. This works, but it
+   gives up most of what made pyscript attractive.
+
+## 4. Open design questions
+
+1. **Overrides.** The spike is edge-triggered, so a manual change lasts until the next flip.
+   Alternatives: back off for a fixed time after a human change, or re-assert continuously.
+   Detection needs `Context` id tracking.
+2. **Startup.** The spike writes the first known value at boot, which can undo a manual change
+   made before the restart. Persisting `last` (`RestoreEntity`) would avoid that.
+3. **Time windows.** `between("22:00", "06:00")` and sun events need wake-ups at the boundaries.
+   The `wake_at` mechanism used by `.for_()` already supports this.
+4. **Non-boolean targets.** Brightness, setpoints and covers need a writer per domain that maps a
+   value to a service call.
+5. **Events / TEA part.** Button presses aren't derived state. They need an `on(event)` handler
+   escape hatch, or first-class modes/state machines whose state is itself a signal.
+6. **Static checks.** Cycles across bindings, and unknown entity ids checked against HA's entity
+   registry at load.
 
 ## 5. Suggested next step
 
-Write the runtime as plain Python with a host adapter (pyscript first) and test it with a
-simulated clock and state store. Settle questions 1–3 there, then grow the compiler alongside it.
+Turn `spike/library/ha_dsl.py` into a real package with unit tests (fake host plus simulated
+clock). Then write a minimal custom-integration host adapter, or an AppDaemon one for a quicker
+first test on real hardware.
