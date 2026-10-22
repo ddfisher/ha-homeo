@@ -593,11 +593,86 @@ state house = home:
 | Matches cascade arms (`trigger -> result`) | yes | no (`->` means from → to) | yes | no |
 | Order-dependence | within a state only | low | high (first match across everything) | low |
 
-**Recommendation: A.** Modes are what you think about when reading a machine later, timeouts and
-entry actions sit naturally inside the state, and the arms match cascades. D is genuinely nicer
-for "remote control" machines, where each button's behaviour per mode is the main question. If
-that turns out to be common, D's `on E:` blocks could be allowed as sugar *inside* A later.
-C stays as the documented meaning of the others.
+**Original recommendation was A. Revised: C, with nested arms (below).** A needs a lot of
+special-purpose syntax:
+- arms that apply in any state;
+- `after D`;
+- `on enter:`;
+- `boost, off:` headings for several states at once;
+- `back`;
+- an implicit initial state.
+
+Each of these is a new construct to learn, and the list would keep growing (exit actions, "in
+any of these states", …). C needs none of them, because everything is an ordinary expression over
+the machine's own value. That is exactly TEA's `update : msg -> model -> model`.
+
+#### Option C+: reducer with nested arms (recommended)
+
+D6 already allows a cascade arm's result to be another cascade. Using that in `state` blocks lets
+C group arms by state (A's readability) or by trigger (D's), with no extra syntax:
+
+```python
+state bath_mode = "auto":
+    remote.long_press                         -> "off"
+    remote.press ->                                       # grouped by trigger (like D)
+        bath_mode == "auto"                   -> "boost"
+        else                                  -> "auto"
+    bath_mode == "boost" for 1h               -> "auto"
+    bath_mode == "off" for 2h                 -> "auto"
+
+state washer = "idle":
+    washer_power > 10 for 2min if washer != "running"         -> "running"
+    washer_power < 3 for 5min if washer == "running"          -> "done"
+    binary_sensor.washer_door turns on if washer == "done"    -> "idle"
+
+on washer becomes "done":                                     # entry action = ordinary action
+    notify.phone(message: "Washing is done")
+
+state house = "home":
+    house == "home" ->                                        # grouped by state (like A)
+        not anyone_home for 10min             -> "away"
+        input_button.goodnight                -> "night"
+        input_button.movie                    -> "movie"
+    house == "away" ->
+        anyone_home                           -> "home"
+    house == "night" ->
+        at 07:00 if workday                   -> "home"
+        at 09:00                              -> "home"
+        kitchen_motion and now in 05:00..07:00 -> "home"
+    house == "movie" ->
+        input_button.movie                    -> previous(house)
+        age(house) > 4h                       -> previous(house)
+```
+
+How each of A's special constructs becomes a general one:
+
+| A's special syntax | C+ equivalent | General feature it uses |
+|---|---|---|
+| arms before the first state (any state) | an unguarded arm | — |
+| `boost, off:` | `bath_mode in ["boost", "off"] ->` | `in` |
+| `after 1h` | `bath_mode == "boost" for 1h`, or `age(bath_mode) > 1h` | `for`, `age()` |
+| `on enter:` / `on exit:` | `on washer becomes "done":` / `leaves` | actions + edge events (D9, D14) |
+| `-> back` | `-> previous(house)` | `previous(x)`: the value before its last change |
+| implicit initial state | `state x = "init":` | — |
+
+New general functions, useful well beyond state machines:
+- **`age(x)`:** time since `x` last changed, i.e. HA's `last_changed`, persisted. For example,
+  `age(sensor.co2) > 1h` means the sensor is stale.
+- **`previous(x)`:** the value before `x` last changed.
+
+What remains specific to `state` blocks:
+1. **The declaration** `state name = initial:`.
+2. **Arms read the value from before the update,** as in TEA. So `bath_mode == "auto"` inside
+   `bath_mode`'s own arms is allowed, and isn't a cycle.
+3. **If no arm fires, the value is unchanged.** There's no required `else`, unlike binding
+   cascades, where a missing `else` is an error.
+4. **Triggers and gates** (D13e).
+
+What we give up vs A:
+- **Entry actions** aren't written inside the state any more.
+- **Reachability checks:** the compiler can still infer the state set (the initial value, plus
+  literal results and `previous()`) and catch typos. Spotting unreachable states only works when
+  guards have the simple form `x == "literal"`.
 
 ### D13b. Condition triggers (Decided: edge-triggered, re-checked on restart)
 
@@ -606,20 +681,25 @@ C stays as the documented meaning of the others.
 | Event | `remote.press`, `door turns on`, `at 07:00` | when it happens while in this state |
 | Event + guard | `remote.press if night` | as above, only if the guard is true at that moment |
 | Condition (bool signal) | `washer_power < 3 for 5min` | when it **becomes** true while in this state |
-| Timeout | `after 1h` | when time in the current state reaches 1h (resets on every entry) |
+| Timeout | `age(house) > 1h`, `house == "boost" for 1h` | an ordinary condition: fires when it becomes true |
 
-- A condition that is already true when a state is entered does **not** fire. Write it so that
-  it changes after entry, or use `after`.
-- **On startup** (and, proposed, on rules reload), each condition arm of the current state is
+- A condition that is already true when a state is entered does **not** fire. That's rarer than
+  it sounds:
+  - the condition is the *whole* expression, so `kitchen_motion and now in 05:00..07:00` still
+    fires at 05:00 if the motion is active then;
+  - most states are entered by a trigger that makes their exit conditions false.
+
+  The main case where it matters is a manual selection in the UI (D13d). If you set `away` while
+  someone is home, `anyone_home -> home` doesn't fire, which is arguably right. Use the `and`
+  form (D13e) to fire on entry.
+- **On startup and on rules reload**, each condition arm of the current state is
   compared with its value persisted from before the shutdown. If it went false → true while HA
   was down, it fires once. **Proposed:** if there's no persisted value (first start), treat
   "true now" as an edge.
-- **Proposed:** `at` schedules whose time passed while HA was down fire once on startup, so a
+- `at` schedules whose time passed while HA was down fire once on startup, so a
   `night → home at 07:00` isn't skipped by a 06:58 restart.
-- One input change causes at most one transition per machine. Conditions in the new state only
-  fire on later changes, so transitions never chain.
-- `for` vs `after`: `washer_power < 3 for 5min` counts from when the power dropped, which may be
-  before the state was entered. `after 5min` counts from entering the state.
+- `washer_power < 3 for 5min` counts from when the power dropped, which may be before the state
+  was entered. To count from entering the state, use `age(washer) > 5min`.
 
 ### D13c. Referring to states (Decided: string comparison)
 
@@ -632,14 +712,36 @@ against the declared states, so a typo like `"boots"` is an error. The usual ope
 
 Each machine is exposed as `select.ha_dsl_<name>`. It shows in history and on dashboards, and can
 be set from the UI. A manual selection counts as a transition: it runs entry and exit actions and
-restarts `after` timers. The entity also persists the machine's state across restarts (restore
+resets `age()`. The entity also persists the machine's state across restarts (restore
 state), along with the persisted condition values from D13b.
+
+### D13e. Triggers and gates in nested arms (Proposed)
+
+Each path through nested arms, e.g. `house == "away" -> anyone_home -> "home"`, needs a rule for
+*what makes it fire*:
+
+- **A path containing an event fires on that event.** All of its conditions are gates, checked
+  at that moment. Example: `remote.press -> bath_mode == "auto" -> "boost"`.
+- **Otherwise, the innermost condition's rising edge fires it,** and outer conditions are gates.
+  Example: `house == "away" -> anyone_home -> "home"` fires when `anyone_home` becomes true while
+  in `away`.
+- **`X if Y`** is the flat way to write "edge of X, gated by Y". **`X and Y`** is one condition,
+  so its edge fires when *either part* makes it true. That includes entering the state.
+
+Edge vs level then becomes something you write, not something baked into the language:
+
+```python
+house == "away" ->
+    anyone_home            -> "home"   # fires only if someone arrives while away
+house == "away" and anyone_home -> "home"   # also fires on entering away with someone home
+```
+
+Because the `and` form can fire on entry, transitions can chain. A chain of more than 10
+transitions in one step is an error, and the machine stops.
 
 ### Proposed details (no decision needed unless you disagree)
 
 - **First match wins** when several arms fire at once, as in cascades.
-- **Entry and exit actions** use the action syntax (D14).
-- **`-> back`** returns to the previous state, e.g. for interruptions like "movie mode".
 - **Reload:** when a rules file is edited, the machine keeps its current state if that state
   still exists. Otherwise it resets to the initial state, with a log message.
 - **Deferred to v2:**
@@ -825,10 +927,11 @@ on humidity > 90% for 30min turns on:
 | D10c | `held(S)` alongside `for` | Open | keep `for`, add `held()` |
 | D11 | Temporal ops | Proposed | `for`, `until`, `debounce`, `min_on` |
 | D12 | Time windows | Proposed | `now in 22:00..06:00` |
-| D13a | State machine shape | **Open (in discussion)** | per-state blocks (A) |
-| D13b | Condition triggers | **Decided** | edge-triggered; re-checked against persisted values on restart |
+| D13a | State machine shape | **Open (in discussion)** | revised: C+, a TEA reducer with nested arms |
+| D13b | Condition triggers | **Decided** | edge-triggered; re-checked against persisted values on restart and reload; missed `at` fires once |
 | D13c | Referring to states | **Decided** | string comparison, compile-time checked |
 | D13d | Visibility in HA | **Decided** | writable `select.ha_dsl_<name>` |
+| D13e | Triggers vs gates in nested arms | Proposed | events trigger; else innermost condition's edge; outer = gates |
 | D14 | Actions | Proposed | `on E:` + service calls, no sleeps |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `since(manual(x)) < D -> keep` |
 | D16 | Unknown handling | Proposed | Kleene logic, unknown → keep |
