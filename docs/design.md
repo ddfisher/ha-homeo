@@ -400,7 +400,7 @@ Alternatives: `between(22:00, 06:00)` (function form), or `after sunset and befo
 
 ---
 
-## 13. State machines (TEA `update`): D13 (Open, in discussion)
+## 13. State machines (TEA `update`): D13 (in discussion)
 
 ### When you need one
 
@@ -425,146 +425,227 @@ fan.bathroom =
     else                   -> stuffy
 ```
 
-### D13a. Overall shape
+### D13a. Overall shape (Open)
 
-**Option A: per-state blocks** (recommended). Each state lists its outgoing transitions as
-`trigger -> target` arms, the same shape as cascades (D6). The first listed state is the initial
-state.
+Four options, each shown on the same three machines.
+
+**Machine 1: `bath_mode`.** One remote cycles modes. A long press means "off" from any state,
+and boost and off time out.
+**Machine 2: `washer`.** Condition-driven, with an entry action.
+**Machine 3: `house`.** Guards, schedules, and returning to the previous state.
+
+#### Option A: per-state blocks
+
+Each state lists its outgoing `trigger -> target` arms, the same shape as cascades (D6). The first
+state listed is the initial state. Arms placed before the first state apply in every state.
 
 ```python
+state bath_mode:
+    remote.long_press                          -> off       # from any state
+    auto:
+        remote.press                           -> boost
+    boost:
+        remote.press                           -> auto
+        after 1h                               -> auto
+    off:
+        remote.press                           -> auto
+        after 2h                               -> auto
+
 state washer:
     idle:
-        washer_power > 10 for 2min           -> running
+        washer_power > 10 for 2min             -> running
     running:
-        washer_power < 3 for 5min            -> done
+        washer_power < 3 for 5min              -> done
     done:
-        on enter: notify.mobile_app_phone(message: "Washing is done")
-        binary_sensor.washer_door turns on   -> idle
-        washer_power > 10 for 2min           -> running
+        on enter: notify.phone(message: "Washing is done")
+        binary_sensor.washer_door turns on     -> idle
+        washer_power > 10 for 2min             -> running
+
+state house:
+    home:
+        not anyone_home for 10min              -> away
+        input_button.goodnight                 -> night
+        input_button.movie                     -> movie
+    away:
+        anyone_home                            -> home
+    night:
+        at 07:00 if workday                    -> home
+        at 09:00                               -> home
+        kitchen_motion and now in 05:00..07:00 -> home
+    movie:
+        input_button.movie                     -> back
+        after 4h                               -> back
 ```
 
-**Option B: one transition table.** Compact for small machines, but it repeats state names and
-splits each state's behaviour across lines.
+#### Option B: transition table
+
+One line per transition: `from -> to when trigger`.
 
 ```python
+state bath_mode = auto:
+    any        -> off      when remote.long_press
+    auto       -> boost    when remote.press
+    boost, off -> auto     when remote.press
+    boost      -> auto     after 1h
+    off        -> auto     after 2h
+
 state washer = idle:
-    idle    -> running   when washer_power > 10 for 2min
-    running -> done      when washer_power < 3 for 5min
-    done    -> idle      when binary_sensor.washer_door turns on
-    done    -> running   when washer_power > 10 for 2min
+    idle    -> running  when washer_power > 10 for 2min
+    running -> done     when washer_power < 3 for 5min
+    done    -> idle     when binary_sensor.washer_door turns on
+    done    -> running  when washer_power > 10 for 2min
+    enter done: notify.phone(message: "Washing is done")
+
+state house = home:
+    home  -> away    when not anyone_home for 10min
+    home  -> night   when input_button.goodnight
+    home  -> movie   when input_button.movie
+    away  -> home    when anyone_home
+    night -> home    when at 07:00 if workday
+    night -> home    when at 09:00
+    night -> home    when kitchen_motion and now in 05:00..07:00
+    movie -> back    when input_button.movie
+    movie -> back    after 4h
 ```
 
-**Option C: TEA-style reducer.** A flat list of `trigger -> new value` arms that guard on the
-current state explicitly. It's the most general (it's what the other two compile to), but the
-current-state guards make it noisy.
+#### Option C: TEA reducer
+
+A flat cascade of `trigger -> new value` arms with explicit guards on the current state. First
+match wins. This is what the other options compile to.
 
 ```python
+state bath_mode = "auto":
+    remote.long_press                                         -> "off"
+    remote.press if bath_mode == "auto"                       -> "boost"
+    remote.press                                              -> "auto"   # boost/off → auto
+    bath_mode == "boost" for 1h                               -> "auto"
+    bath_mode == "off" for 2h                                 -> "auto"
+
 state washer = "idle":
     washer == "idle" and washer_power > 10 for 2min           -> "running"
     washer == "running" and washer_power < 3 for 5min         -> "done"
     washer == "done" and binary_sensor.washer_door turns on   -> "idle"
     washer == "done" and washer_power > 10 for 2min           -> "running"
+on washer becomes "done": notify.phone(message: "Washing is done")
+
+state house = "home":
+    house == "home" and not anyone_home for 10min             -> "away"
+    input_button.goodnight if house == "home"                 -> "night"
+    input_button.movie if house == "home"                     -> "movie"
+    house == "away" and anyone_home                           -> "home"
+    at 07:00 if house == "night" and workday                  -> "home"
+    at 09:00 if house == "night"                              -> "home"
+    house == "night" and kitchen_motion and now in 05:00..07:00 -> "home"
+    input_button.movie if house == "movie"                    -> back
+    house == "movie" for 4h                                   -> back
 ```
 
-### D13b. What can trigger a transition
+#### Option D: grouped by trigger
 
-| Trigger | Example | Semantics |
+Each trigger lists what it does in each state: "what does this button do?"
+
+```python
+state bath_mode = auto:
+    on remote.press:
+        auto        -> boost
+        boost, off  -> auto
+    on remote.long_press:
+        any         -> off
+    after 1h:
+        boost       -> auto
+    after 2h:
+        off         -> auto
+
+state washer = idle:
+    on washer_power > 10 for 2min:
+        idle, done  -> running
+    on washer_power < 3 for 5min:
+        running     -> done
+    on binary_sensor.washer_door turns on:
+        done        -> idle
+    enter done: notify.phone(message: "Washing is done")
+
+state house = home:
+    on input_button.goodnight:
+        home   -> night
+    on input_button.movie:
+        home   -> movie
+        movie  -> back
+    on not anyone_home for 10min:
+        home   -> away
+    on anyone_home:
+        away   -> home
+    on at 07:00 if workday, at 09:00, kitchen_motion and now in 05:00..07:00:
+        night  -> home
+    after 4h:
+        movie  -> back
+```
+
+#### Comparison
+
+| | A: per-state | B: table | C: reducer | D: by trigger |
+|---|---|---|---|---|
+| "What can happen in mode X?" | **one block** | scan rows for X | scan guards | scattered |
+| "What does this button do?" | scattered | scan rows | scan rows | **one block** |
+| Repetition | none | state names | `house == "…"` everywhere | state names |
+| Timeouts | `after 1h` inside the state | `after 1h` row | `x == "s" for 1h` (self-reference) | `after` group |
+| Entry/exit actions | `on enter:` inside the state | separate `enter` lines | separate `on … becomes` | separate `enter` lines |
+| Matches cascade arms (`trigger -> result`) | yes | no (`->` means from → to) | yes | no |
+| Order-dependence | within a state only | low | high (first match across everything) | low |
+
+**Recommendation: A.** Modes are what you think about when reading a machine later, timeouts and
+entry actions sit naturally inside the state, and the arms match cascades. D is genuinely nicer
+for "remote control" machines, where each button's behaviour per mode is the main question. If
+that turns out to be common, D's `on E:` blocks could be allowed as sugar *inside* A later.
+C stays as the documented meaning of the others.
+
+### D13b. Condition triggers (Decided: edge-triggered, re-checked on restart)
+
+| Trigger | Example | Fires |
 |---|---|---|
-| Event | `remote.press`, `door turns on`, `at 07:00` | fires when the event happens while in this state |
+| Event | `remote.press`, `door turns on`, `at 07:00` | when it happens while in this state |
 | Event + guard | `remote.press if night` | as above, only if the guard is true at that moment |
-| Condition (bool signal) | `washer_power < 3 for 5min` | **see below** |
-| Timeout | `after 1h` | time spent in the current state ≥ 1h (resets on every entry) |
+| Condition (bool signal) | `washer_power < 3 for 5min` | when it **becomes** true while in this state |
+| Timeout | `after 1h` | when time in the current state reaches 1h (resets on every entry) |
 
-Condition triggers can be **level-triggered** (recommended) or **edge-triggered**:
+- A condition that is already true when a state is entered does **not** fire. Write it so that
+  it changes after entry, or use `after`.
+- **On startup** (and, proposed, on rules reload), each condition arm of the current state is
+  compared with its value persisted from before the shutdown. If it went false → true while HA
+  was down, it fires once. **Proposed:** if there's no persisted value (first start), treat
+  "true now" as an edge.
+- **Proposed:** `at` schedules whose time passed while HA was down fire once on startup, so a
+  `night → home at 07:00` isn't skipped by a 06:58 restart.
+- One input change causes at most one transition per machine. Conditions in the new state only
+  fire on later changes, so transitions never chain.
+- `for` vs `after`: `washer_power < 3 for 5min` counts from when the power dropped, which may be
+  before the state was entered. `after 5min` counts from entering the state.
 
-- **Level:** checked on entry to the state and whenever an input changes. It fires whenever the
-  condition is true while in that state. This is how SCXML/statecharts treat "eventless"
-  transitions. It's robust: if you enter `away` while someone is already home, `anyone_home ->
-  home` fires straight away.
-- **Edge:** fires only when the condition *becomes* true while in the state. This is simpler to
-  explain, but it misses conditions that were already true on entry or across a restart. Use
-  `turns on` explicitly when you mean an edge.
+### D13c. Referring to states (Decided: string comparison)
 
-`for` vs `after`: `washer_power < 3 for 5min` counts from when the power dropped, which may be
-before the state was entered. `after 5min` counts from entering the state.
+`bath_mode == "boost"`, `bath_mode in ["boost", "off"]`. These are checked at compile time
+against the declared states, so a typo like `"boots"` is an error. The usual operators apply:
+- `bath_mode becomes "done"` is an event;
+- `since(bath_mode becomes "boost")` and `held(bath_mode == "off")` work as elsewhere.
 
-### D13c. Referring to states from outside
+### D13d. Visibility in HA (Decided: writable `select` entity)
 
-| Option | Example |
-|---|---|
-| **A. String comparison** (recommended), checked at compile time against the declared states | `bath_mode == "boost"`, `bath_mode in ["boost", "off"]` |
-| B. A boolean per state | `bath_mode.boost` |
-| C. `is` with bare names | `bath_mode is boost` |
-
-A is consistent with how other string states are written (D3b). A typo like `"boots"` is still a
-compile error, because the machine's state set is known.
-
-The usual operators apply: `since(bath_mode becomes "boost")`, `held(bath_mode == "off")`,
-`bath_mode turns …` is an error (it's not a bool), `bath_mode becomes "done"` is an event.
-
-### D13d. Visibility in HA
-
-**Recommended: expose each machine as a `select` entity** (`select.ha_dsl_washer`). Its history
-graph then shows the mode over time, it can go on dashboards, and you can set it by hand from the
-UI. A manual selection counts as a transition, so it runs entry actions and restarts `after`
-timers. The machine's state is restored from this entity across restarts.
-
-Alternatives: a read-only `sensor`, or not exposed at all.
+Each machine is exposed as `select.ha_dsl_<name>`. It shows in history and on dashboards, and can
+be set from the UI. A manual selection counts as a transition: it runs entry and exit actions and
+restarts `after` timers. The entity also persists the machine's state across restarts (restore
+state), along with the persisted condition values from D13b.
 
 ### Proposed details (no decision needed unless you disagree)
 
-- **Shared transitions.** Arms written before the first state block apply in every state, and
-  are checked before the state's own arms:
-  ```python
-  state bath_mode:
-      remote.long_press       -> off          # from any state
-      auto:
-          remote.press        -> boost
-      boost:
-          remote.press        -> auto
-          after 1h            -> auto
-      off:
-          remote.press        -> auto
-          after 2h            -> auto
-  ```
-- **First match wins** when several transitions are enabled at once, as in cascades.
-- **Entry and exit actions:** `on enter:` / `on exit:` blocks inside a state, using the action
-  syntax (D14).
-- **`-> back`** returns to the previous state. That's useful for interruptions like "movie mode".
-- **Chains:** after a transition, level conditions are re-checked in the new state. A chain of
-  more than 10 transitions in one step is a runtime error, and the machine stops. A level
-  condition that targets its own state is a compile error, because it would loop. Events may
-  re-enter the same state, which restarts its `after` timers.
+- **First match wins** when several arms fire at once, as in cascades.
+- **Entry and exit actions** use the action syntax (D14).
+- **`-> back`** returns to the previous state, e.g. for interruptions like "movie mode".
 - **Reload:** when a rules file is edited, the machine keeps its current state if that state
   still exists. Otherwise it resets to the initial state, with a log message.
 - **Deferred to v2:**
   - nested (hierarchical) states;
   - extended state, i.e. variables stored alongside the mode, like a counter or remembered
     brightness.
-
-### Larger example
-
-```python
-state house:
-    home:
-        not anyone_home for 10min                 -> away
-        input_button.goodnight                    -> night
-        input_button.movie                        -> movie
-    away:
-        anyone_home                               -> home
-    night:
-        at 07:00 if workday                       -> home
-        at 09:00                                  -> home
-        kitchen_motion if now in 05:00..07:00     -> home
-    movie:
-        input_button.movie                        -> back
-        after 4h                                  -> back
-
-light.living =
-    house == "movie"   -> on(brightness: 5%)
-    house == "night"   -> off
-    else               -> since(living_motion) < 10min
-```
 
 ---
 
@@ -744,7 +825,10 @@ on humidity > 90% for 30min turns on:
 | D10c | `held(S)` alongside `for` | Open | keep `for`, add `held()` |
 | D11 | Temporal ops | Proposed | `for`, `until`, `debounce`, `min_on` |
 | D12 | Time windows | Proposed | `now in 22:00..06:00` |
-| D13 | State machines | **Open (in discussion)** | per-state blocks, level-triggered conditions, `after D`, exposed as `select` |
+| D13a | State machine shape | **Open (in discussion)** | per-state blocks (A) |
+| D13b | Condition triggers | **Decided** | edge-triggered; re-checked against persisted values on restart |
+| D13c | Referring to states | **Decided** | string comparison, compile-time checked |
+| D13d | Visibility in HA | **Decided** | writable `select.ha_dsl_<name>` |
 | D14 | Actions | Proposed | `on E:` + service calls, no sleeps |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `since(manual(x)) < D -> keep` |
 | D16 | Unknown handling | Proposed | Kleene logic, unknown → keep |
