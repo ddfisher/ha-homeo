@@ -425,7 +425,7 @@ fan.bathroom =
     else                   -> stuffy
 ```
 
-### D13a. Overall shape (Open)
+### D13a. Overall shape (Decided, provisionally: C+, revisit after real use)
 
 Four options, each shown on the same three machines.
 
@@ -606,7 +606,7 @@ Each of these is a new construct to learn, and the list would keep growing (exit
 any of these states", …). C needs none of them, because everything is an ordinary expression over
 the machine's own value. That is exactly TEA's `update : msg -> model -> model`.
 
-#### Option C+: reducer with nested arms (recommended)
+#### Option C+: reducer with nested arms (chosen)
 
 D6 already allows a cascade arm's result to be another cascade. Using that in `state` blocks lets
 C group arms by state (A's readability) or by trigger (D's), with no extra syntax:
@@ -715,7 +715,7 @@ be set from the UI. A manual selection counts as a transition: it runs entry and
 resets `age()`. The entity also persists the machine's state across restarts (restore
 state), along with the persisted condition values from D13b.
 
-### D13e. Triggers and gates in nested arms (Proposed)
+### D13e. Triggers and gates in nested arms (Decided, provisionally)
 
 Each path through nested arms, e.g. `house == "away" -> anyone_home -> "home"`, needs a rule for
 *what makes it fire*:
@@ -927,11 +927,11 @@ on humidity > 90% for 30min turns on:
 | D10c | `held(S)` alongside `for` | Open | keep `for`, add `held()` |
 | D11 | Temporal ops | Proposed | `for`, `until`, `debounce`, `min_on` |
 | D12 | Time windows | Proposed | `now in 22:00..06:00` |
-| D13a | State machine shape | **Open (in discussion)** | revised: C+, a TEA reducer with nested arms |
+| D13a | State machine shape | **Decided (provisional)** | C+: TEA reducer with nested arms; revisit after real use |
 | D13b | Condition triggers | **Decided** | edge-triggered; re-checked against persisted values on restart and reload; missed `at` fires once |
 | D13c | Referring to states | **Decided** | string comparison, compile-time checked |
 | D13d | Visibility in HA | **Decided** | writable `select.ha_dsl_<name>` |
-| D13e | Triggers vs gates in nested arms | Proposed | events trigger; else innermost condition's edge; outer = gates |
+| D13e | Triggers vs gates in nested arms | **Decided (provisional)** | events trigger; else innermost condition's edge; outer = gates |
 | D14 | Actions | Proposed | `on E:` + service calls, no sleeps |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `since(manual(x)) < D -> keep` |
 | D16 | Unknown handling | Proposed | Kleene logic, unknown → keep |
