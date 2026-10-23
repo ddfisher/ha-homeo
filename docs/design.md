@@ -188,9 +188,10 @@ rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts ar
 | I17 | Cycles | `let` and binding cycles are errors (except via `manual()`); state machines break cycles |
 | I18 | Writer read-back | `on(...)` matches when every given parameter matches; per-attribute tolerances; transitional states match their goal; `text.*` accepted like `input_text.*` |
 | I19 | Error format | `file:line:col: error: …`, caret snippet, optional `hint:` |
-| I20 | Dry run | `# mode: dry_run` directive or an integration option; logs would-be calls |
+| I20 | Dry run | `# mode: dry_run` directive or an integration option; logs would-be calls. Turning it off brings devices in line once, as for a new binding |
 | I21 | `homeo.explain` | A service with a response; target = binding target, entity, machine or `let` name; per arm: condition value, subexpression values (sugar expanded, `let` names kept), active arm; plus summary, device state, last write |
 | I22 | Editor panel | CodeMirror 6, bundled into one committed module (HACS ships only `custom_components/homeo/`); admin-only websocket API (`homeo/files`, `files/subscribe`, `file/read`, `file/check`, `file/save`, `file/delete`, `explain`); errors checked as you type against the other running files; save reloads at once; Explain follows the cursor; unsaved edits kept across pages; saves refuse to overwrite edits made elsewhere |
+| I23 | Future timestamps | `t(x)` is the most recent value at or before now; a future value happens when its time comes. Before one has been seen to pass, the last occurrence is "some time before now" (as for pre-restart times), so `age(x)` is a lower bound |
 
 ### Repository state
 
@@ -264,7 +265,7 @@ condition.
 | `x` is | `x` counts as true when | `t(x)` |
 |---|---|---|
 | a bool | it is `on`/`true` | when it last became true |
-| a timestamp (event, button, `manual()`, time point) | it has ever happened | its value, i.e. when it last happened |
+| a timestamp (event, button, `manual()`, time point) | it has ever happened | its value, i.e. when it last happened. A value in the future (a next-alarm sensor) hasn't happened yet: it happens when its time comes (I23) |
 
 Core constructs that use change times:
 
@@ -701,7 +702,9 @@ state house = "home":
   `fresh()`.
 - **Timeouts** are ordinary conditions: `bath_mode == "boost" for 1h`, or `age(house) > 4h`.
 - **Chains:** if a transition makes another arm match, it is applied too. The same value
-  appearing twice in one step is a loop, which is reported as an error, and the machine stops.
+  appearing twice in one step is a loop, which is reported as an error (a Repairs issue), and
+  the machine stops. It starts again when a state is picked from its `select` entity, or when
+  the rules are reloaded.
 - **Restarts** (§17): the machine's value and change time are restored from its `select` entity
   (HA's restore state), and the arms are re-evaluated.
   - Arms on exact timestamps still work: a 07:00 that passed while HA was down, after entering the

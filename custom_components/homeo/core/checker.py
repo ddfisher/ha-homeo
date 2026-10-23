@@ -726,6 +726,9 @@ class Checker:
                 op = {"<": ">", ">": "<", "<=": ">=", ">=": "<="}.get(op, op)
             if not isinstance(b, ir.Const):
                 self.fail("compare `now` with a fixed time of day", span)
+            if op in (">", ">=") and b.value == MIDNIGHT:
+                # every time of day is at or after midnight (the range 00:00..00:00 is empty)
+                return ir.Const(T.BOOL, span, text, False, True)
             if op in (">", ">="):
                 return ir.InTimeRange(
                     T.BOOL, span, text, False, b.value, MIDNIGHT, sun=self.sun_cell(span, b.value)

@@ -100,8 +100,12 @@ class RCell:
         return self.defn.key
 
     def occurrence(self) -> Num:
-        """t(x) (§3): the value for timestamps, when it last became true for bools."""
+        """t(x) (§3): for timestamps, the most recent value at or before now (a value in the
+        future hasn't happened yet); for bools, when it last became true."""
         if self.defn.type == T.TIMESTAMP:
+            occ = self.extra.get("occ")
+            if occ is not None:
+                return occ
             v = self.known
             return v if isinstance(v, Num) else NEVER
         return self.t_true
@@ -223,6 +227,11 @@ class Runtime:
             if isinstance(d, ir.BusCell):
                 self.bus_cells.setdefault(d.event_type, []).append(rc)
 
+        # every machine starts running again
+        for old_m in old_machines.values():
+            if old_m.failed:
+                self.host.machine_stopped(old_m.defn.name, old_m.defn.file, None)
+
         # initial values, carrying over old state
         self._wake_heap = []
         for rc in sorted(self.cells.values(), key=lambda c: c.rank):
@@ -250,6 +259,10 @@ class Runtime:
                     old.last_written,
                     old.last_handled,
                 )
+                if old.dry_run and not s.dry_run:
+                    # Dry run turned off: nothing was really written, so bring the device in
+                    # line once, as for a new binding (its state stands in, D16).
+                    s.last_known = NOTHING
             else:
                 s.last_handled = self.now
 
@@ -327,8 +340,6 @@ class Runtime:
             rc.extra["seen"] = self.cells[d.source.key].occurrence()
             rc.extra["times"] = []
         v = self._compute(rc)
-        rc.wake = self._cur_wake
-        self._push_wake(rc)
         rc.value = v
         rc.ct = maybe_before(self.now)
         if isinstance(d, ir.ToggleCell):
@@ -341,6 +352,9 @@ class Runtime:
         else:
             rc.known = v
             rc.t_true = rc.ct if to_bool(v) is True else maybe_before(rc.ct.hi)
+        self._update_occurrence(rc)
+        rc.wake = self._cur_wake
+        self._push_wake(rc)
 
     def _initial_change_time(self, d: ir.EntityCell) -> Num:
         st = self.host.get_state(d.entity_id)
@@ -507,9 +521,31 @@ class Runtime:
     def _recompute(self, rc: RCell) -> bool:
         self._cur_wake = INF
         v = self._compute(rc)
+        changed = self._set(rc, v)
+        changed = self._update_occurrence(rc) or changed
         rc.wake = self._cur_wake
         self._push_wake(rc)
-        return self._set(rc, v)
+        return changed
+
+    def _update_occurrence(self, rc: RCell) -> bool:
+        """Timestamps: t(x) is the most recent value at or before now. A value in the future
+        (a next-alarm sensor, `sensor.alarm - 30min`) happens when its time comes, so wake up
+        then. Until a value has been seen to pass, the last occurrence is only known to be
+        before now (as for change times from before a restart, D17). Returns whether t(x)
+        changed."""
+        if rc.defn.type != T.TIMESTAMP:
+            return False
+        old = rc.extra.get("occ")
+        v = rc.known
+        if not isinstance(v, Num):
+            occ = NEVER
+        elif v.hi <= self.now:
+            occ = v
+        else:
+            self._wake_at(v.hi)
+            occ = old if old is not None and old.hi <= self.now else maybe_before(self.now)
+        rc.extra["occ"] = occ
+        return occ != old
 
     # ============================================================== evaluation
 
@@ -748,12 +784,13 @@ class Runtime:
                 seen = visited.setdefault(id(m), [m.value])
                 if new in seen or rounds > MAX_SETTLE_ROUNDS:
                     m.failed = True
+                    loop = " → ".join([*seen, new])
                     self.host.log(
                         "error",
-                        f"state machine `{m.defn.name}` loops: "
-                        + " → ".join([*seen, new])
-                        + "; stopped until the rules are reloaded",
+                        f"state machine `{m.defn.name}` loops: {loop}; stopped until a state "
+                        "is selected or the rules are reloaded",
                     )
+                    self.host.machine_stopped(m.defn.name, m.defn.file, loop)
                     continue
                 seen.append(new)
                 self._transition(m, new)
@@ -855,7 +892,8 @@ class Runtime:
             self._write(s, b, v)
 
     def _write(self, s: RSink, b: ir.BindingDef, v: Any) -> None:
-        s.last_written = v
+        if not s.dry_run:
+            s.last_written = v  # what manual-change detection compares with (D21)
         source = f"{b.file}:{b.span.line}"
         for call in b.writer.calls(b.entity_id, v):
             call = ServiceCall(call.domain, call.service, call.data, call.entity_id, source, b.key)
@@ -1028,12 +1066,14 @@ class Runtime:
     def _handle_select(self, name: str, value: str) -> None:
         self.now = max(self.now, self.host.now())
         m = self.machines.get(name)
-        if m is None or value not in m.defn.states:  # type: ignore[attr-defined]
+        if m is None or value not in m.defn.states:
             return
-        if value == m.value:
-            return
-        m.failed = False
-        self._transition(m, value)
+        if m.failed:  # any selection, even of the current state, starts it again
+            m.failed = False
+            self.host.machine_stopped(name, m.defn.file, None)
+            self._machines_to_eval.add(m)
+        if value != m.value:
+            self._transition(m, value)
         self._propagate([])
 
     # ================================================================ queries

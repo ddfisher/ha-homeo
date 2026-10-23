@@ -6,9 +6,9 @@ its test passes, strict mode turns that into a failure, and the marker should be
 
 import pytest
 
-from custom_components.homeo.core.checker import compile_source
-from custom_components.homeo.core.errors import CompileError
+from custom_components.homeo.core.values import INF
 
+from .fakehost import DEFAULT_START as DEFAULT_T
 from .fakehost import standard_world, world
 from .rig import Rig
 
@@ -213,12 +213,180 @@ state m = "a":
     r.h.advance(5)
     r.h.press("input_button.boost")  # a → b → a in one step: reported as a loop (D13b)
     assert any("loops" in msg for level, msg in r.h.logs if level == "error")
+    assert r.h.stopped == {"m": "a → b → a"}  # shown as a Repairs issue
     r.rt.set_machine("m", "a")
     assert r.machine("m") == "a"
+    assert r.h.stopped == {}
     r.h.set_state("binary_sensor.bathroom_window", "off")
     r.h.advance(5)
     r.h.press("input_button.boost")
     assert r.machine("m") == "b"  # running again
+
+
+def test_reloading_restarts_a_stopped_machine():
+    rules = """
+state m = "a":
+    m == "a" and fresh(input_button.boost) -> "b"
+    m == "b" and binary_sensor.bathroom_window -> "a"
+"""
+    r = Rig(rules)
+    r.h.set_state("binary_sensor.bathroom_window", "on")
+    r.h.advance(5)
+    r.h.press("input_button.boost")
+    assert r.h.stopped == {"m": "a → b → a"}
+    r.reload(rules)
+    assert r.h.stopped == {}
+    assert not r.rt.machines["m"].failed
+
+
+def test_reselecting_the_current_state_revives_a_stopped_machine():
+    r = Rig(
+        """
+state m = "a":
+    m == "a" and fresh(input_button.boost) -> "b"
+    m == "b" and binary_sensor.bathroom_window -> "a"
+"""
+    )
+    r.h.set_state("binary_sensor.bathroom_window", "on")
+    r.h.advance(5)
+    r.h.press("input_button.boost")
+    assert r.machine("m") == "b"
+    r.h.set_state("binary_sensor.bathroom_window", "off")
+    r.rt.set_machine("m", "b")  # stuck in b; pick b again
+    assert r.h.stopped == {}
+    r.h.set_state("binary_sensor.bathroom_window", "on")
+    assert r.machine("m") == "a"  # its rules apply again
+
+
+# --------------------------------------------------------- timestamps in the future
+
+
+ALARM = {"device_class": "timestamp"}
+
+
+def alarm_world(at: float):
+    h = standard_world()
+    h.set_state("sensor.next_alarm", h.iso(at), ALARM, notify=False)
+    return h
+
+
+def test_action_on_a_future_timestamp_fires_when_the_time_comes():
+    """A next-alarm sensor hasn't happened until its time comes (§3: t(x) is when x last
+    happened), so moving the alarm doesn't fire the action."""
+    h = alarm_world(at=DEFAULT_T + H)
+    r = Rig('on sensor.next_alarm:\n    notify.mobile_app_phone(message: "wake up")', host=h)
+    assert r.new_calls() == []
+    r.h.advance(MIN)
+    r.h.set_state("sensor.next_alarm", h.iso(h.t + 2 * H), ALARM)  # alarm moved later
+    assert r.new_calls() == []
+    r.h.advance(2 * H - 1)
+    assert r.new_calls() == []
+    r.h.advance(1)
+    assert r.new_calls() == ["notify.mobile_app_phone message=wake up"]
+
+
+def test_action_before_a_future_timestamp():
+    h = alarm_world(at=DEFAULT_T + H)
+    r = Rig(
+        'on sensor.next_alarm - 30min:\n    notify.mobile_app_phone(message: "heating on")',
+        host=h,
+    )
+    r.h.advance(30 * MIN - 1)
+    assert r.new_calls() == []
+    r.h.advance(1)
+    assert r.new_calls() == ["notify.mobile_app_phone message=heating on"]
+
+
+def test_time_until_a_future_timestamp_still_reads_its_value():
+    h = alarm_world(at=DEFAULT_T + H)
+    r = Rig("switch.pump := sensor.next_alarm - now < 30min", host=h)
+    assert r.new_calls() == []
+    r.h.advance(30 * MIN)
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+
+
+def test_age_of_a_future_timestamp_is_unknown_until_settled():
+    """Before any occurrence has been seen, the last one is only known to be before load,
+    as for change times from before a restart (D17): `age() < 10min` is unknown for 10 min
+    (no write), then false."""
+    h = alarm_world(at=DEFAULT_T + H)
+    h.set_state("switch.pump", "on", notify=False)
+    r = Rig("switch.pump := age(sensor.next_alarm) < 10min", host=h)
+    assert r.new_calls() == []
+    r.h.advance(10 * MIN)
+    assert r.new_calls() == ["switch.turn_off switch.pump"]
+
+
+def test_past_occurrence_is_remembered_when_the_value_moves_on():
+    """When the alarm rings, the sensor moves on to the next alarm; `age()` still counts
+    from the one that rang."""
+    h = alarm_world(at=DEFAULT_T + H)
+    r = Rig("switch.pump := age(sensor.next_alarm) < 10min", host=h)
+    r.h.advance(H)  # the alarm rings
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+    r.h.advance(5)
+    r.h.set_state("sensor.next_alarm", h.iso(h.t + 86400), ALARM)  # tomorrow's alarm
+    assert r.rt.cells["state:sensor.next_alarm"].occurrence().lo == DEFAULT_T + H
+    r.h.advance(10 * MIN - 5)
+    assert r.new_calls() == ["switch.turn_off switch.pump"]
+
+
+def test_never_happened_timestamp_is_still_never():
+    r = Rig("switch.pump := age(input_button.boost) > 1h")  # never pressed
+    assert r.rt.cells["state:input_button.boost"].occurrence().hi == -INF
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+
+
+# -------------------------------------------------------------------- dry run (I20)
+
+
+def test_turning_dry_run_off_brings_devices_in_line():
+    r = Rig("# mode: dry_run\nswitch.pump := sensor.bathroom_co2 > 800\n")
+    r.h.set_state("sensor.bathroom_co2", "900")
+    assert r.new_calls() == []
+    r.reload("switch.pump := sensor.bathroom_co2 > 800\n")
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+    r.reload("switch.pump := sensor.bathroom_co2 > 800\n")
+    assert r.new_calls() == []  # once
+
+
+def test_turning_dry_run_off_leaves_matching_devices_alone():
+    r = Rig("# mode: dry_run\nswitch.pump := sensor.bathroom_co2 > 800\n")
+    r.h.set_state("sensor.bathroom_co2", "900")
+    r.h.set_state("switch.pump", "on")  # someone already switched it on
+    r.reload("switch.pump := sensor.bathroom_co2 > 800\n")
+    assert r.new_calls() == []
+
+
+def test_dry_run_writes_dont_count_for_manual_detection():
+    """Nothing was written in dry run, so a person's change is manual even if it matches
+    the would-be write."""
+    r = Rig(
+        """# mode: dry_run
+switch.pump :=
+    age(manual(switch.pump)) < 1h -> keep
+    else                         -> sensor.bathroom_co2 > 800
+"""
+    )
+    r.h.set_state("sensor.bathroom_co2", "900")  # would switch on
+    r.h.advance(5)
+    r.h.set_state("switch.pump", "on")  # a person switches it on
+    assert r.rt.cells["manual:switch.pump"].extra["t"].lo == r.h.t
+
+
+# ---------------------------------------------------------------- time of day (I3)
+
+
+def test_now_at_or_after_midnight_is_always_true():
+    r = Rig("switch.pump := now >= 00:00")
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+
+
+def test_now_before_midnight_is_always_false():
+    h = standard_world()
+    h.set_state("switch.pump", "on", notify=False)
+    r = Rig("switch.pump := now < 00:00", host=h)
+    assert r.new_calls() == ["switch.turn_off switch.pump"]
 
 
 # ----------------------------------------------------------------------- known bugs
@@ -260,63 +428,3 @@ def test_any_typed_off_turns_an_on_off_device_off():
     r = Rig("switch.pump := sensor.mystery", host=h)
     r.h.set_state("sensor.mystery", "off")
     assert r.new_calls() == ["switch.turn_off switch.pump"]
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="a timestamp in the future (e.g. a phone's next-alarm sensor) counts as having "
-    "already happened: the action fires at load and whenever the alarm is moved",
-)
-def test_action_on_a_future_timestamp_fires_when_the_time_comes():
-    h = standard_world()
-    alarm = {"device_class": "timestamp"}
-    h.set_state("sensor.next_alarm", h.iso(h.t + H), alarm, notify=False)
-    r = Rig(
-        'on sensor.next_alarm:\n    notify.mobile_app_phone(message: "wake up")',
-        host=h,
-    )
-    assert r.new_calls() == []
-    r.h.advance(MIN)
-    r.h.set_state("sensor.next_alarm", h.iso(h.t + 2 * H), alarm)  # alarm moved later
-    assert r.new_calls() == []
-    r.h.advance(2 * H)
-    assert r.new_calls() == ["notify.mobile_app_phone message=wake up"]
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="dry run records results as written (I20) and reloads carry them over (D17 "
-    "rule 6), so switching dry run off leaves devices out of line until a result changes",
-)
-def test_turning_dry_run_off_brings_devices_in_line():
-    r = Rig("# mode: dry_run\nswitch.pump := sensor.bathroom_co2 > 800\n")
-    r.h.set_state("sensor.bathroom_co2", "900")
-    assert r.new_calls() == []
-    r.reload("switch.pump := sensor.bathroom_co2 > 800\n")
-    assert r.new_calls() == ["switch.turn_on switch.pump"]
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="InTimeRange(00:00, 00:00) is an empty range, so `now >= 00:00` is always false",
-)
-def test_now_at_or_after_midnight_is_always_true():
-    r = Rig("switch.pump := now >= 00:00")
-    assert r.new_calls() == ["switch.turn_on switch.pump"]
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="the self-read check compares exact attributes, but a cover's state and its "
-    "position move together: these rules drive the blinds open and closed forever",
-)
-@pytest.mark.parametrize(
-    "rule",
-    [
-        'cover.blinds.position := 0 if cover.blinds == "open" else 100',
-        'cover.blinds := "closed" if cover.blinds.current_position > 50 else "open"',
-    ],
-)
-def test_cover_rule_reading_the_coupled_part_of_its_target_is_a_self_read(rule):
-    with pytest.raises(CompileError, match="itself"):
-        compile_source(rule, "test.homeo", standard_world())

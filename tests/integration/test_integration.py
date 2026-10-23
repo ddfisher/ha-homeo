@@ -103,6 +103,29 @@ async def test_compile_errors_create_issue_and_keep_old_rules(
     assert issues.async_get_issue(DOMAIN, "compile_error_pump_homeo") is None
 
 
+async def test_stopped_machine_creates_issue_until_reload(
+    hass: HomeAssistant, setup_homeo, freezer
+):
+    hass.states.async_set("input_button.boost", "unknown")
+    hass.states.async_set("binary_sensor.window", "on")
+    rules = """
+state m = "a":
+    m == "a" and fresh(input_button.boost) -> "b"
+    m == "b" and binary_sensor.window -> "a"
+"""
+    entry = await setup_homeo({"m.homeo": rules})
+    freezer.tick(timedelta(seconds=1))
+    hass.states.async_set("input_button.boost", dt_util.utcnow().isoformat())
+    await hass.async_block_till_done()
+    issues = ir.async_get(hass)
+    issue = issues.async_get_issue(DOMAIN, "machine_stopped_m")
+    assert issue is not None
+    assert issue.translation_placeholders == {"name": "m", "file": "m.homeo", "loop": "a → b → a"}
+
+    await entry.runtime_data.async_reload()
+    assert issues.async_get_issue(DOMAIN, "machine_stopped_m") is None
+
+
 async def wait_for(hass: HomeAssistant, predicate, timeout: float = 5.0) -> None:
     """Wait for something done by the watcher thread (real time, not the frozen clock)."""
     loop_deadline = asyncio.get_running_loop().time() + timeout

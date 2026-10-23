@@ -169,6 +169,9 @@ class HassHost:
         extra = stored.extra_data.as_dict() if stored.extra_data else {}
         return self._restored(stored.state.state, extra.get("changed_at"), stored.state)
 
+    def machine_stopped(self, name: str, file: str, loop: str | None) -> None:
+        self.manager.machine_stopped(name, file, loop)
+
     @staticmethod
     def _restored(value: str, changed_at: Any, state: State) -> tuple[str, float] | None:
         ts = None

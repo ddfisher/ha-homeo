@@ -29,6 +29,7 @@ from .const import (
     ENTITY_DEBOUNCE,
     FILE_DEBOUNCE,
     ISSUE_PREFIX,
+    MACHINE_ISSUE_PREFIX,
     RULES_DIR,
     RULES_SUFFIX,
     SIGNAL_FILES_CHANGED,
@@ -109,6 +110,7 @@ class HomeoManager:
         self.globals = Globals()  # what the running files define, for checking an edited file
         self.add_select_entities: Callable[[list[Any]], None] | None = None
         self.machine_entities: dict[str, MachineSelect] = {}
+        self.stopped_machines: set[str] = set()  # machines with a Repairs issue
         self._unsubs: list[Callable[[], None]] = []
         self._started = False
         self._closed = False
@@ -171,6 +173,8 @@ class HomeoManager:
             self._debounce()
             self._debounce = None
         self.runtime.stop()
+        for name in list(self.stopped_machines):  # a new runtime starts them all again
+            self.machine_stopped(name, "", None)
 
     # --------------------------------------------------------------- reloads
 
@@ -365,6 +369,25 @@ class HomeoManager:
                 self.hass.async_create_task(ent.async_remove())
             if ent.entity_id and registry.async_get(ent.entity_id):
                 registry.async_remove(ent.entity_id)
+
+    def machine_stopped(self, name: str, file: str, loop: str | None) -> None:
+        """A Repairs issue while a state machine is stopped after a loop (D13b)."""
+        issue = MACHINE_ISSUE_PREFIX + re.sub(r"[^a-z0-9_]", "_", name.lower())
+        if loop is None:
+            if name in self.stopped_machines:
+                self.stopped_machines.discard(name)
+                ir.async_delete_issue(self.hass, DOMAIN, issue)
+            return
+        self.stopped_machines.add(name)
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            issue,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="machine_stopped",
+            translation_placeholders={"name": name, "file": file, "loop": loop},
+        )
 
     def select_option(self, name: str, option: str) -> None:
         self.runtime.set_machine(name, option)
