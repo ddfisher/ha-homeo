@@ -1,12 +1,33 @@
 # Homeo: language design
 
-Status: **draft, in discussion.** Every choice has an ID (`D1`, `D2`, …) so we can refer to it.
-Each is marked **Decided**, **Proposed** (my recommendation, not yet agreed) or **Open**.
-Examples use decided syntax, or the recommended option where nothing is decided yet.
-Alternatives we compared in detail are kept in the appendix.
+Status: **ready for implementation (v1).** Every decision has an ID (`D1`, `D2`, …) and is
+listed in the decision log (§22). Two are marked *provisional*, to revisit once real rules have
+been written: the state machine shape (D13a) and bare times as time points (D12). Alternatives we
+compared are kept in the appendices.
 
 **Homeo** (from *homeostasis*: a system that keeps itself in balance). Rule files use `.homeo`,
 and the integration's domain is `homeo`.
+
+**In v1:** everything in §1–§21 that isn't marked "later" or "v2".
+
+**Deliberately not in v1:**
+- `until`, debounce, `min_on`/`min_off` sugar (§11);
+- declarative notifications (D22);
+- user-defined writers (§7);
+- nested states and extended state (§13);
+- templates and functions (D18);
+- area-scoped names (D2);
+- persistence across restarts (§17).
+
+**Suggested build order:**
+1. lexer and parser;
+2. name resolution and type checking;
+3. runtime core (signals, change times, cascades, `latest`, state machines, actions), tested
+   against a fake HA host with a simulated clock;
+4. writers;
+5. the HA integration: host adapter, file watching, reloads, `select` entities, errors as repairs
+   issues;
+6. tooling (`homeo.explain`, dry run).
 
 ---
 
@@ -46,8 +67,9 @@ numbers for free.
 
 **Restarts are rare, so v1 doesn't try to reconstruct history across them.** HA resets
 `last_changed` to the boot time for most entities. Rather than keeping our own copy, v1 treats
-those change times as unknown-but-before-the-restart, and is careful not to move devices because
-of a restart (§17). Persistence can be added piece by piece later if reboots turn out to matter.
+those change times as "some time before the restart", and only brings devices in line with
+their rules once a rule's result is definite (§17). Persistence can be added piece by piece later
+if reboots turn out to matter.
 
 Pipeline: `file → parse → AST → resolve names + type-check → graph → Runtime ↔ HassHost`.
 
@@ -57,7 +79,7 @@ Pipeline: `file → parse → AST → resolve names + type-check → graph → R
 
 Everything is a **signal**. A signal has:
 - a **value** at every moment;
-- a **change time**: when that value last changed (HA's `last_changed`, persisted by us).
+- a **change time**: when that value last changed (tracked by the runtime; see §17 for restarts).
 
 There is no separate event type. Things that "happen" are signals whose value is the **time they
 last happened**, exactly as HA stores them: an `event.*` entity's state is the time of its last
@@ -88,6 +110,7 @@ Top-level statements:
 | **Definition** `let stuffy = <signal>` | a named value: an alias for an entity, or anything computed |
 | **State machine** `state mode = "init":` + arms | a named signal that remembers (§13) |
 | **Action** `on <signal>: <service calls>` | imperative escape hatch (notifications etc., §14). Top-level only. |
+| **Block** `with override D:` | applies an override policy to the bindings inside (§15) |
 
 Value types: `bool`, `number`, `string`, `duration`, `time-of-day`, `timestamp`. Any value can
 also be `unknown`. Type errors come with hints, e.g.
@@ -127,8 +150,8 @@ messages. We can ship a VS Code / TextMate grammar later.
 - **Each file has its own namespace** for `let` and `state` names. To use another file's state
   machine, read its entity (`select.homeo_house`, D13d). State machine names must still be
   unique across files, because their entity ids would collide.
-- **Open idea (v2):** area-scoped blocks (`in area bathroom: fan := co2 > 800`), resolved through
-  HA's area registry.
+- **Idea for v2:** area-scoped blocks (`in area bathroom: fan := co2 > 800`), resolved through
+  HA's area registry. This would relax the full-id rule inside such blocks.
 
 Unknown entity ids are errors, with "did you mean". The check runs against HA's entity registry
 when the rules load.
@@ -153,7 +176,7 @@ Attribute names that aren't identifiers use `light.hall["rgb color"]`.
 | Literal | Meaning |
 |---|---|
 | `30s`, `5min`, `2h`, `1d`, `1h30min` | durations. `m` is deliberately **not** minutes (it reads like metres). |
-| `50%` | percent. Compared with a `%` sensor, it means 50. Written to `light.*.brightness`, it's scaled to 0–255 (or sent as `brightness_pct`). |
+| `50%` | percent. Compared with a `%` sensor, it means 50. As a brightness (`on(brightness: 50%)`) it's sent as `brightness_pct`, and compared with HA's 0–255 `brightness` when read back. |
 | `07:00`, `22:30` | time of day (in ranges and comparisons), or a time point (§12) |
 | `sunrise`, `sunset`, `sunset - 30min`, `dawn`, `dusk` | solar times (from `sun.sun`) |
 | `mon`…`sun`, `weekday`, `weekend` | days |
@@ -164,7 +187,7 @@ is `unknown`, not an error.
 
 ---
 
-## 7. Bindings and targets: D5
+## 7. Bindings and targets: D5 (Decided)
 
 ```python
 fan.bathroom := co2 > 800 or humidity > 60%           # → fan.turn_on / fan.turn_off
@@ -177,8 +200,9 @@ cover.blinds.position := 0 if now in sunset..sunrise else 100
 - **One writer per target (Decided).** Two bindings for the same entity (or the same attribute)
   are a compile error, across all files. Combine them with a cascade (§8).
 - **`keep` (Decided)** is a special value meaning "don't drive this right now". The entity is
-  left as it is. When the expression stops being `keep`, the binding writes again. This is the
-  basis of override handling (§15).
+  left as it is. When the expression stops being `keep`, the device's current state stands in
+  for the previous result, as after a restart (D16). So the device is brought back in line if it
+  differs. This is the basis of override handling (§15).
 
 ### Writers (Decided)
 
@@ -193,13 +217,13 @@ built-in rule for one kind of target that knows three things:
 3. **Whether the target is writable at all.** `sensor.x := 5` and read-only attributes like
    `light.hall.color_mode` are compile errors.
 
-Proposed v1 writers:
+v1 writers:
 
 | Target | Example | Service call |
 |---|---|---|
 | on/off: `switch`, `fan`, `light`, `input_boolean`, `siren` | `fan.bathroom := on` | `<domain>.turn_on` / `turn_off` |
 | light with settings | `light.hall := on(brightness: 80%, kelvin: 2700)` | `light.turn_on(brightness_pct: 80, color_temp_kelvin: 2700)` |
-| fan speed | `fan.bathroom.percentage := 60%` | `fan.set_percentage` |
+| fan with speed | `fan.bathroom := on(percentage: 60%)` | `fan.turn_on(percentage: 60)` |
 | climate setpoint | `climate.living.temperature := 21` | `climate.set_temperature` |
 | climate mode | `climate.living := "heat"` | `climate.set_hvac_mode` |
 | cover position | `cover.blinds.position := 30%` | `cover.set_cover_position` |
@@ -215,8 +239,12 @@ Decisions:
 - **A light is bound as a whole.** Setting a light's brightness turns it on, so
   `light.hall := off` and `light.hall.brightness := 50%` as separate bindings would fight.
   Lights take `off`, or `on(brightness: …, kelvin: …)`, and binding a light's attributes
-  separately is a compile error. Climate's mode and setpoint use independent services, so
-  separate bindings are fine there.
+  separately is a compile error.
+  - **Fans work the same way** (`off` or `on(percentage: …)`), since setting a speed also turns a
+    fan on.
+  - **A cover** is bound either by state (`"open"`/`"closed"`) or by `position`, not both.
+  - **Climate's mode and setpoint** use independent services, so separate bindings are fine
+    there. The same goes for media volume.
 - **Anything not in the table** (vacuums, alarm panels, water heaters, …) is handled with actions
   in v1 (`on x: vacuum.start()`). v2 may add user-defined writers that name the service to call
   for each value.
@@ -235,7 +263,7 @@ fan.bathroom :=
     else                               -> stuffy
 
 climate.living.temperature :=
-    window.living                      -> 7           # frost protection only
+    binary_sensor.living_window        -> 7           # frost protection only
     not anyone_home for 2h             -> 15
     age(input_button.warm_up) < 2h     -> 22
     now in 23:00..06:30                -> 17
@@ -279,27 +307,27 @@ Each of these is a **timestamp signal**: its value is the time it last happened.
 | Source | Syntax | Notes |
 |---|---|---|
 | Event entity (HA 2023.8+: remotes, doorbells, buttons) | `event.hall_remote` | HA's own state. Its attributes (`event_type`, …) describe the last event. |
-| One event type | `event.hall_remote.double_press` (D8) | Time of the last event of that type. The runtime tracks this per type and persists it. |
+| One event type | `event.hall_remote.double_press` (D8) | Time of the last event of that type, tracked by the runtime. After a restart, only the latest event's type is known (from HA's state); other types count as "before the restart" (§17). |
 | Button helpers / button entities | `input_button.boost`, `button.x` | HA's own state: time of the last press |
 | Manual control | `manual(fan.bathroom)` | Time of the last change not made by homeo (§15) |
 | Time points | `07:00`, `sunset - 30min` | Time of the most recent occurrence (§12) |
 | Periodic | `every 10min` | Time of the most recent tick |
-| Raw bus events | `bus.zha_event(device_ieee: "…", command: "on")` | For integrations without event entities. Time of the last matching event, tracked by the runtime. |
+| Raw bus events | `bus.zha_event(device_ieee: "…", command: "on")` | For integrations without event entities. Time of the last matching event, tracked by the runtime ("before the restart" after a restart). |
 
 Because these are ordinary signals, they work with every construct: `age()`, `latest`,
 `fresh()`, `on`, and `previous()`. There's no separate event type, so there are no
 event/signal conversion rules.
 
-### D8. Event-type filtering for `event.*` entities (Decided: A, third segment)
+### D8. Event-type filtering for `event.*` entities (Decided)
 
-| Option | Example |
-|---|---|
-| **A. Third segment** (recommended) | `event.hall_remote.double_press` |
-| B. Call | `event.hall_remote("double_press")` |
-| C. Comparison | `event.hall_remote.event_type == "double_press"`. This describes the *last* event only, so a later single press hides it. Not the same thing. |
+`event.hall_remote.double_press` is the time of the last `double_press` event. It's consistent with
+attribute syntax. Attributes of event entities are rarely needed; if one is, use
+`event.x["event_type"]`.
 
-A is consistent with attribute syntax. Attributes of event entities are rarely needed; if one
-is, use `event.x["event_type"]`.
+Rejected:
+- `event.hall_remote("double_press")`: a function-call form for no gain;
+- `event.hall_remote.event_type == "double_press"`: this only describes the *last* event, so a
+  later single press hides it.
 
 ---
 
@@ -325,7 +353,7 @@ light.hall := motion or age(motion) < 10min            # motion now, or ended < 
 - `age(door) < 5min` counts closing as well as opening. "Opened in the last 5 min" is
   `door and age(door) < 5min`.
 
-### D19. `latest` blocks (Decided; name tentative)
+### D19. `latest` blocks (Decided; the name may still change)
 
 **The arm whose condition happened most recently wins.** "Happened" means `t(x)` from §3: the last
 press for buttons and events, and the moment it last became true for bool conditions.
@@ -358,13 +386,13 @@ let blinds_mode = latest
 | `count(x, 10min)` | how many times `x` happened in the last 10 min, e.g. triple-press detection. The runtime keeps this history itself, since HA only stores the latest. |
 
 After a restart (§17):
-- `toggle()` is kept like a state machine;
+- `toggle()` restarts from its `initial` value (no storage in v1);
 - `count()` only counts what happened since the restart;
 - `previous(x)` is `unknown` until `x` changes again.
 
 ---
 
-## 11. Temporal sugar (D11)
+## 11. Temporal sugar: D11 (Decided)
 
 Sugar is **defined as a rewrite into core constructs**, not as a separate feature. Error
 messages and `homeo.explain` can show the expansion.
@@ -373,6 +401,7 @@ messages and `homeo.explain` can show the expansion.
 |---|---|---|
 | `x for D` | `x and age(x) >= D` | **Decided** |
 | `with override D:` | adds `age(manual(target)) < D -> keep` as the first arm of each binding inside (§15) | **Decided** |
+| `with override never:` | not a rewrite: a binding option. After a manual change, the binding writes its current result again straight away (§15). | **Decided** |
 
 ```python
 light.porch := lux < 20 for 5min                 # = lux < 20 and age(lux < 20) >= 5min
@@ -425,7 +454,7 @@ revisit (e.g. an explicit `at(07:00)`) only if it causes confusion in practice.
 
 ### When you need one
 
-Derived values (`=` bindings) can't remember *how they got here*. `age()`, `latest` and
+Derived values (`let` definitions and `:=` bindings) can't remember *how they got here*. `age()`, `latest` and
 `toggle()` cover simple memory ("pressed in the last 30 min", "last button wins"). A state
 machine is for anything with **more than one step of history**:
 
@@ -498,10 +527,13 @@ state house = "home":
 - **Timeouts** are ordinary conditions: `bath_mode == "boost" for 1h`, or `age(house) > 4h`.
 - **Chains:** if a transition makes another arm match, it is applied too. The same value
   appearing twice in one step is a loop, which is reported as an error, and the machine stops.
-- **Restarts** (§17): the machine's value and change time are restored from its `select` entity,
-  and the arms are re-evaluated. Arms on exact timestamps still work: a 07:00 that passed while HA
-  was down, after entering the state, is still `fresh`. Arms on bool conditions whose change time
-  is from before the restart are `unknown` until those conditions change again.
+- **Restarts** (§17): the machine's value and change time are restored from its `select` entity
+  (HA's restore state), and the arms are re-evaluated.
+  - Arms on exact timestamps still work: a 07:00 that passed while HA was down, after entering the
+    state, is still `fresh`.
+  - Arms that depend on change times from before the restart are `unknown` until they can be
+    settled (§17 rule 2). That covers `fresh()` of a bool, `age()` and `for`.
+  - Plain conditions (`anyone_home`) evaluate normally.
 
 ### D20. `fresh(x)` (Decided)
 
@@ -529,7 +561,7 @@ be set from the UI. A manual selection is an ordinary change: `age()` resets, `f
 relative to it, and `on` actions for the new value run. The entity also persists the machine's
 state across restarts (restore state).
 
-### Other details (Decided)
+### Other details (Decided, D13f)
 
 - **Reload:** when a rules file is edited, the machine keeps its current state if that state
   still exists. Otherwise it resets to the initial state, with a log message.
@@ -582,7 +614,8 @@ Getting that right needs bookkeeping: which occurrences have already been handle
 one construct with that bookkeeping.** In React terms, bindings are `render` (pure and
 idempotent) and `on` is `useEffect`. In Elm terms, `on` produces a `Cmd`.
 
-It isn't a separate mechanism, though. Each action keeps one persisted timestamp, "last handled".
+It isn't a separate mechanism, though. Each action keeps one timestamp, "last handled" (in memory;
+§17 covers restarts).
 **`on x if g: body` means: whenever `t(x)` is later than the last-handled time, set last-handled
 to `t(x)`, and run `body` if `g` is true.** That's the same comparison as `fresh()`, relative to
 the action instead of a state machine.
@@ -619,8 +652,10 @@ not in v1; they're a candidate for a later version.
 ### Other details (Decided)
 
 - **After a restart, everything that happened before it counts as handled** (§17). There's no
-  catch-up in v1. (This replaces the earlier "catch up, capped at 1h", which needed persistence.)
-- On first load, "last handled" starts at "now", so nothing from the past fires.
+  catch-up in v1.
+- `x` in `on x` must be a bool or a timestamp, like `latest` conditions.
+- On first load, "last handled" starts at "now", so nothing from the past fires. Reloads keep it
+  for actions that still exist.
 - Service calls are written `domain.service(arg: value)`, or `entity.service(…)` to set the
   target.
 - Actions can read signals but can't call services on entities that have bindings (compile
@@ -645,16 +680,16 @@ fan.bathroom :=
     else                             -> stuffy
 ```
 
-…with sugar for the common cases:
+…with shorthand for the common cases (§11):
 ```python
 with override 1h:            # same as above, for every binding in the block
     fan.bathroom := stuffy
-with override never:         # re-assert immediately (e.g. pumps, safety rules)
+with override never:         # re-assert straight after a manual change (e.g. pumps, safety rules)
     switch.pump := pressure < 2
 ```
 
-When the hour is up, the `keep` arm stops matching. The binding's value changes, so it writes
-and the device re-syncs.
+When the hour is up, the `keep` arm stops matching. The device's current state stands in for the
+previous result (§7, D16), so the device is brought back in line if it differs.
 
 `manual(target)` is the one allowed self-reference, so it's exempt from cycle detection.
 
@@ -699,9 +734,9 @@ Known limits:
   "Previous" means the last *known* result, skipping `unknown` periods:
   - `on → unknown → off` writes `off`;
   - `on → unknown → on` writes nothing;
-  - if there is no previous known result (after a restart, or for a brand-new binding), the
-    **device's current state** stands in for it. The binding writes its first known result only
-    if the device doesn't already match it.
+  - if there is no previous known result (after a restart, for a brand-new binding, or after the
+    result was `keep`), the **device's current state** stands in for it. The binding writes its
+    first known result only if the device doesn't already match it.
 - Fallbacks: `co2 ?? 0`, or `available(sensor.co2)` as an explicit test.
 - In cascades and `latest`, an `unknown` condition falls through to the next arm. (The
   alternative, making the whole result `unknown`, is safer but brittle: one flaky sensor would
@@ -758,14 +793,16 @@ rule's result is definite.**
      disagrees, since `manual()` history isn't kept. Restarts are rare enough for this to be
      fine in v1.
 4. **Actions treat everything before the restart as handled.** No catch-up.
-   - **Rule reloads are not restarts.** Reloads happen on every save, so they must not
-     undo manual changes. When a file is edited, each binding that still exists keeps its
-     previous known result. An edit that changes a rule's result applies immediately; unrelated
-     edits leave devices alone. A brand-new binding starts from the device's current state, like
-     after a restart.
 5. **State machines** keep their restored value and re-evaluate (§13). A 07:00 transition missed
-   during downtime still happens at boot. Arms on bool conditions wait until those conditions
-   change again.
+   during downtime still happens at boot. Arms that depend on pre-restart change times wait until
+   they can be settled.
+6. **Rule reloads are not restarts.** Reloads happen on every save, so they must not undo manual
+   changes. When a file is edited:
+   - each binding that still exists keeps its previous known result, so an edit that changes a
+     rule's result applies immediately and unrelated edits leave devices alone;
+   - actions keep their "last handled" time;
+   - state machines keep their state (D13f);
+   - a brand-new binding starts from the device's current state, as after a restart.
 
 **Things we could add later, each on its own, if reboots turn out to matter more:**
 - persist `manual()` timestamps, so timed overrides survive restarts;
@@ -773,10 +810,6 @@ rule's result is definite.**
 - persist last-written values, so a manual change made before a restart survives it;
 - read change times from HA's recorder, when it's enabled and keeps the entity, for exact `age()`.
 
-Earlier approvals that this replaces:
-- D13b's "restarts just re-evaluate with persisted change times";
-- D14's 1h catch-up;
-- the old D17 ("write only if different from the persisted last-written value").
 
 ---
 
@@ -801,7 +834,7 @@ with no runtime cost. Leaving this out of v1 is fine.
 - Compile errors appear as an HA **repairs issue / persistent notification**, with file, line,
   column and a caret snippet. Old rules keep running until the file compiles.
 - **Dry-run mode** (per file: `# mode: dry_run`, or an integration option) logs the writes it
-  would make instead of making them.
+  would make and the actions it would run, instead of doing them.
 - **`homeo.explain`** service: given a target, it reports the current value of each
   subexpression, with sugar expanded, and which arm is active ("fan.bathroom is ON because
   `age(remote.press) < 30min` (pressed 12 min ago)").
@@ -831,7 +864,7 @@ So `co2 > 800 for 5min or humidity > 60%` means `(co2 > 800 for 5min) or (humidi
 
 ---
 
-## 21. Full example
+## 21. Full example (v1 syntax)
 
 ```python
 # bathroom.homeo
@@ -876,21 +909,21 @@ on humidity > 90% for 30min:
 
 ## 22. Decision log
 
-| ID | Topic | Status | Decision / current recommendation |
+| ID | Topic | Status | Decision |
 |---|---|---|---|
 | D0 | Name / file extension | **Decided** | Homeo; `.homeo` files in `<config>/homeo/`; integration domain `homeo` |
 | D1 | Grammar base | **Decided** | custom Python-flavoured grammar, own parser |
 | D2 | Names | **Decided** | `let name = expr` for aliases and computed values; `:=` binds full entity ids only; one namespace per file |
 | D3 | Attributes / string states | **Decided** | `entity.attr`; quoted strings, `on`/`off` keywords |
 | D4 | Units & literals | **Decided** | `5min`, `50%`, `22:00`, `sunset - 30min` |
-| D5 | Bindings & targets | **Decided** | `:=`; one writer per target; `keep`; built-in writer table; lights bound as a whole; other domains via actions in v1 |
+| D5 | Bindings & targets | **Decided** | `:=`; one writer per target; `keep` (re-syncs from device state when it ends); built-in writer table; lights and fans bound as a whole; other domains via actions in v1 |
 | D6 | Priority cascades | **Decided** | `cond -> value` arms, `\|` for guarded sub-arms, first match wins, `else` required in bindings |
 | D7 | Event sources | **Decided** | timestamp signals; table in §9 |
 | D8 | Event-type filter | **Decided** | `event.remote.double_press` |
 | D9 | Events | **Decided** | no event type: events are timestamp-valued state, as in HA |
 | D10 | Recency | **Decided** | `age(x)`: time since `x` last changed |
-| D11 | Temporal sugar | **Decided** | `x for D` = `x and age(x) >= D`; `until`, debounce, `min_on` are "maybe later" |
-| D12 | Time | **Decided** | `now in 22:00..06:00` ranges; `fresh(07:00)`: a bare time is a time point |
+| D11 | Temporal sugar | **Decided** | `x for D` = `x and age(x) >= D`; `with override D` / `never`; `until`, debounce, `min_on` are "maybe later" |
+| D12 | Time | **Decided** (time points provisional) | `now in 22:00..06:00` ranges; `fresh(07:00)`: a bare time is a time point |
 | D13a | State machine shape | **Decided (provisional)** | `state m = init:` + arms (TEA reducer); revisit after real use |
 | D13b | State machine semantics | **Decided** | arms are level-triggered conditions; chains with loop detection; restarts per D17 |
 | D13c | Referring to states | **Decided** | string comparison, compile-time checked |
@@ -898,8 +931,8 @@ on humidity > 90% for 30min:
 | D13f | Reload & v2 deferrals | **Decided** | keep state across reloads if it still exists; nested states and extended state deferred to v2 |
 | D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; no catch-up after restarts (D17) |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `age(manual(x)) < D -> keep` |
-| D16 | Unknown handling | **Decided** | Kleene logic; unknown → keep; change times skip dropouts; a binding writes when its known result changes (device state stands in when there's no previous result) |
-| D17 | Restarts | **Decided** | no storage of our own in v1; pre-restart change times are lower bounds; devices synced to definite results at boot; reloads keep previous results |
+| D16 | Unknown handling | **Decided** | Kleene logic; unknown → keep; change times skip dropouts; a binding writes when its known result changes (device state stands in when there's no previous result, e.g. after a restart or `keep`) |
+| D17 | Restarts & reloads | **Decided** | no storage of our own in v1; pre-restart change times are lower bounds; devices synced to definite results at boot; reloads keep bindings', actions' and machines' state |
 | D18 | Abstraction | **Decided: v2** | compile-time templates |
 | D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `cond -> value` arms |
 | D20 | "Since entering this state" | **Decided** | `fresh(x)`, only inside `state` blocks |
@@ -908,7 +941,7 @@ on humidity > 90% for 30min:
 
 ---
 
-## Appendix: alternatives considered
+## Appendix A: alternatives considered
 
 ### A1. Cascade layouts (D6)
 
@@ -926,8 +959,8 @@ on humidity > 90% for 30min:
 - **Transition table** (`from -> to when trigger`): repeats state names, and `->` meant
   "from → to" instead of "condition → result".
 - **Grouped by trigger** (`on remote.press: auto -> boost`): best for remote-control machines,
-  awkward for condition-driven ones. Nested arms under `| fresh(remote.press) ->` give the same
-  grouping.
+  awkward for condition-driven ones. A `fresh(remote.press)` guard with `|` sub-arms gives the
+  same grouping.
 
 ### A3. A separate event type (previous D9)
 
@@ -943,6 +976,8 @@ Treating events as timestamp-valued state, as HA does, removed all three.
 - `x after y` (generic "changed more recently than"): replaced by `latest` blocks for
   last-wins logic and `fresh()` inside state machines.
 - `new x`: renamed `fresh(x)`, because `new` means something very different in most languages.
+
+---
 
 ## Appendix B: name candidates (D0)
 
