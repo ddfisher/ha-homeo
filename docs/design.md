@@ -11,7 +11,7 @@ and the integration's domain is `homeo`.
 **In v1:** everything in §1–§21 that isn't marked "later" or "v2".
 
 **Deliberately not in v1:**
-- `until`, debounce, `min_on`/`min_off` sugar (§11);
+- `with override`, `until`, debounce, `min_on`/`min_off` sugar (§11);
 - declarative notifications (D22);
 - user-defined writers (§7);
 - nested states and extended state (§13);
@@ -41,8 +41,8 @@ and the integration's domain is `homeo`.
 - **Readable by someone who knows a little Python.** Python-flavoured, indentation-based,
   `and`/`or`/`not`, `x if c else y`.
 - **Mistakes caught at load time:** unknown entities, type errors, conflicting writers, cycles.
-- **A small core, with sugar defined in terms of it.** Sugar like `for` and `with override` is
-  defined as a rewrite into core constructs (§11, §15). More sugar is only added once real rules
+- **A small core, with sugar defined in terms of it.** Sugar like `for` is defined as a rewrite
+  into core constructs (§11). More sugar is only added once real rules
   show a need (§11, "maybe later").
 
 Non-goals for v1: replacing HA's UI automation editor; dashboards; arbitrary Python inside rules.
@@ -110,7 +110,6 @@ Top-level statements:
 | **Definition** `let stuffy = <signal>` | a named value: an alias for an entity, or anything computed |
 | **State machine** `state mode = "init":` + arms | a named signal that remembers (§13) |
 | **Action** `on <signal>: <service calls>` | imperative escape hatch (notifications etc., §14). Top-level only. |
-| **Block** `with override D:` | applies an override policy to the bindings inside (§15) |
 
 Value types: `bool`, `number`, `string`, `duration`, `time-of-day`, `timestamp`. Any value can
 also be `unknown`. Type errors come with hints, e.g.
@@ -400,19 +399,18 @@ messages and `homeo.explain` can show the expansion.
 | Sugar | Expands to | Status |
 |---|---|---|
 | `x for D` | `x and age(x) >= D` | **Decided** |
-| `with override D:` | adds `age(manual(target)) < D -> keep` as the first arm of each binding inside (§15) | **Decided** |
-| `with override never:` | not a rewrite: a binding option. After a manual change, the binding writes its current result again straight away (§15). | **Decided** |
 
 ```python
 light.porch := lux < 20 for 5min                 # = lux < 20 and age(lux < 20) >= 5min
 ```
 
-Hysteresis needs no sugar; it's a `latest` block:
+Hysteresis needs no sugar; it's a `latest` block. Each condition counts from the moment it last
+*became* true, so between 700 and 800 the fan keeps whichever state it was last switched to:
 ```python
 fan.bedroom := latest
-    co2 > 800                  -> on             # on above 800…
-    co2 < 700                  -> off            # …off below 700
-    else                       -> off
+    co2 > 800                  -> on             # turns on when co2 rises above 800
+    co2 < 700                  -> off            # turns off when co2 falls below 700
+    else                       -> off            # neither has happened yet
 ```
 
 ### Maybe later
@@ -421,6 +419,8 @@ Possible sugar, **not planned for v1**. We'll add these only if real rules keep 
 
 | Sugar | Would expand to |
 |---|---|
+| `with override D:` | adds `age(manual(target)) < D -> keep` as the first arm of each binding inside the block (§15) |
+| `with override never:` | a binding option rather than a rewrite: after a manual change, the binding writes its current result again straight away (pumps, safety rules) |
 | `a until b` (latch) | a `latest` block with arms `a -> true`, `b -> false`, `else -> false` |
 | `x debounced D` / `with debounce D:` | write only once the result has been stable for D (`age(result) >= D`) |
 | `with min_on D1, min_off D2:` | equipment protection: once switched, stay in that state at least this long |
@@ -591,7 +591,7 @@ on humidity > 90% for 30min:
 
 `on x [if g]:` is a **top-level statement**, the same kind of thing as a binding or a `state`
 declaration. It can't appear anywhere else: not inside a `state` block, a binding, a cascade, a
-`latest` block, a `with` block, an expression, or another action's body. Each of those is a
+`latest` block, an expression, or another action's body. Each of those is a
 compile error with a hint:
 - inside a state machine: *"use `fresh(x)` for 'happened since entering this state'"*;
 - inside a binding or expression: *"use `age(x) < D` for 'happened recently'"*.
@@ -672,7 +672,7 @@ When a human changes a device that a binding drives, **the change sticks until t
 computed value next changes.** The binding writes only on changes to its own result, so it never
 fights a manual change in between.
 
-For a time limit, use `manual()` and `keep` (no new concepts):
+For a time limit, add a `manual()` arm that yields with `keep` (no new concepts):
 
 ```python
 fan.bathroom :=
@@ -680,13 +680,8 @@ fan.bathroom :=
     else                             -> stuffy
 ```
 
-…with shorthand for the common cases (§11):
-```python
-with override 1h:            # same as above, for every binding in the block
-    fan.bathroom := stuffy
-with override never:         # re-assert straight after a manual change (e.g. pumps, safety rules)
-    switch.pump := pressure < 2
-```
+Shorthand for this (`with override 1h:`) and a re-assert-immediately option
+(`with override never:`) are "maybe later" sugar (§11).
 
 When the hour is up, the `keep` arm stops matching. The device's current state stands in for the
 previous result (§7, D16), so the device is brought back in line if it differs.
@@ -889,13 +884,13 @@ state bath_mode = "auto":
     bath_mode == "boost" for 30min      -> "auto"
     bath_mode == "off" for 2h           -> "auto"
 
-with override 1h:
-    fan.bathroom :=
-        bath_mode == "boost"            -> on
-        bath_mode == "off"              -> off
-        window                          -> off
-        night and not humidity > 85%    -> off
-        else                            -> stuffy
+fan.bathroom :=
+    age(manual(fan.bathroom)) < 1h      -> keep         # yield for an hour after a manual change
+    bath_mode == "boost"                -> on
+    bath_mode == "off"                  -> off
+    window                              -> off
+    night and not humidity > 85%        -> off
+    else                                -> stuffy
 
 light.bathroom :=
     motion or age(motion) < 5min        -> on(brightness: 10% if night else 100%)
@@ -922,7 +917,7 @@ on humidity > 90% for 30min:
 | D8 | Event-type filter | **Decided** | `event.remote.double_press` |
 | D9 | Events | **Decided** | no event type: events are timestamp-valued state, as in HA |
 | D10 | Recency | **Decided** | `age(x)`: time since `x` last changed |
-| D11 | Temporal sugar | **Decided** | `x for D` = `x and age(x) >= D`; `with override D` / `never`; `until`, debounce, `min_on` are "maybe later" |
+| D11 | Temporal sugar | **Decided** | `x for D` = `x and age(x) >= D`; `with override`, `until`, debounce, `min_on` are "maybe later" |
 | D12 | Time | **Decided** (time points provisional) | `now in 22:00..06:00` ranges; `fresh(07:00)`: a bare time is a time point |
 | D13a | State machine shape | **Decided (provisional)** | `state m = init:` + arms (TEA reducer); revisit after real use |
 | D13b | State machine semantics | **Decided** | arms are level-triggered conditions; chains with loop detection; restarts per D17 |
@@ -930,7 +925,7 @@ on humidity > 90% for 30min:
 | D13d | Visibility in HA | **Decided** | writable `select.homeo_<name>` |
 | D13f | Reload & v2 deferrals | **Decided** | keep state across reloads if it still exists; nested states and extended state deferred to v2 |
 | D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; no catch-up after restarts (D17) |
-| D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `age(manual(x)) < D -> keep` |
+| D15 | Manual-override default | **Decided** | edge-triggered; timed overrides via `age(manual(x)) < D -> keep` |
 | D16 | Unknown handling | **Decided** | Kleene logic; unknown → keep; change times skip dropouts; a binding writes when its known result changes (device state stands in when there's no previous result, e.g. after a restart or `keep`) |
 | D17 | Restarts & reloads | **Decided** | no storage of our own in v1; pre-restart change times are lower bounds; devices synced to definite results at boot; reloads keep bindings', actions' and machines' state |
 | D18 | Abstraction | **Decided: v2** | compile-time templates |
