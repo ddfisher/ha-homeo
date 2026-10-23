@@ -121,13 +121,13 @@ messages. We can ship a VS Code / TextMate grammar later.
 Unknown entity ids are errors, with "did you mean". The check runs against HA's entity registry
 when the rules load.
 
-### D3. Attributes (Proposed)
+### D3. Attributes (Decided)
 
 `light.hall.brightness`: the third segment is an attribute. The one exception is the `event`
 domain, where the third segment filters by event type (see D8).
 Attribute names that aren't identifiers use `light.hall["rgb color"]`.
 
-### D3b. String states (Proposed)
+### D3b. String states (Decided)
 
 - `on`/`off` and `true`/`false` are keywords.
 - Other states are quoted strings: `person.ann == "home"`, `climate.lr.hvac_action in ["heating", "idle"]`.
@@ -136,7 +136,7 @@ Attribute names that aren't identifiers use `light.hall["rgb color"]`.
 
 ---
 
-## 6. Literals & units: D4 (Proposed)
+## 6. Literals & units: D4 (Decided)
 
 | Literal | Meaning |
 |---|---|
@@ -170,9 +170,9 @@ light.hall = on(brightness: 80%, kelvin: 2700) if motion else off
 - **Writers per domain.** A table maps `(domain, attribute)` to a service call:
   `light` takes `on`/`off`/brightness/kelvin/rgb, `climate` setpoints and `hvac_mode`,
   `cover` position, `media_player` volume, `input_*` helpers, `select`, `number`.
-- **One writer per target.** Two bindings for the same entity (or the same attribute) are a
+- **One writer per target (Decided).** Two bindings for the same entity (or the same attribute) are a
   compile error, across all files. Combine them with a cascade (§8).
-- **`keep`** is a special value meaning "don't drive this right now". The entity is left as it is.
+- **`keep` (Decided)** is a special value meaning "don't drive this right now". The entity is left as it is.
   When the expression stops being `keep`, the binding writes again. This is the basis of
   override handling (§15).
 
@@ -248,7 +248,7 @@ Because these are ordinary signals, they work with every construct: `age()`, `la
 `fresh()`, `on`, and `previous()`. There's no separate event type, so there are no
 event/signal conversion rules.
 
-### D8. Event-type filtering for `event.*` entities (Open)
+### D8. Event-type filtering for `event.*` entities (Decided: A, third segment)
 
 | Option | Example |
 |---|---|
@@ -348,7 +348,7 @@ fan.bedroom = latest
 
 ---
 
-## 12. Time: D12 (Proposed)
+## 12. Time: D12 (Decided)
 
 Time-of-day **ranges** are bool signals:
 ```python
@@ -641,16 +641,17 @@ Known limits:
 
 ---
 
-## 16. Unknown / unavailable: D16 (Proposed)
+## 16. Unknown / unavailable: D16 (Decided)
 
 - Three-valued logic: `on or unknown` = `on`, `off and unknown` = `off`, otherwise `unknown`.
 - If a binding's result is `unknown`, the target is left alone (an implicit `keep`).
 - Fallbacks: `co2 ?? 0`, or `available(sensor.co2)` as an explicit test.
-- In cascades and `latest`, an `unknown` condition falls through to the next arm. (Proposed. The
-  alternative is to make the whole result `unknown`, which is safer but brittle.)
+- In cascades and `latest`, an `unknown` condition falls through to the next arm. (The
+  alternative, making the whole result `unknown`, is safer but brittle: one flaky sensor would
+  freeze the whole rule.)
 - **Change times skip over `unknown` periods.** If a value is the same before and after a dropout,
   its change time doesn't move, so `age()`, `fresh()`, `on` and `latest` don't see a spurious
-  change. (`x for D` therefore isn't broken by a brief dropout. Proposed.)
+  change. (`x for D` therefore isn't broken by a brief dropout.)
 
 ---
 
@@ -761,24 +762,24 @@ on humidity > 90% for 30min:
 |---|---|---|---|
 | D0 | Name / file extension | Open | — |
 | D1 | Grammar base | **Decided** | custom Python-flavoured grammar, own parser |
-| D2 | Entity refs & aliases | Proposed | full ids + definitions as aliases; dotted = entity |
-| D3 | Attributes / string states | Proposed | `entity.attr`; quoted strings, `on`/`off` keywords |
-| D4 | Units & literals | Proposed | `5min`, `50%`, `22:00`, `sunset - 30min` |
-| D5 | Binding operator & targets | Proposed | `=`, per-domain writers, `on(attr: …)`, `keep` |
+| D2 | Entity refs & aliases | Open (in discussion) | full ids + definitions as aliases; dotted = entity |
+| D3 | Attributes / string states | **Decided** | `entity.attr`; quoted strings, `on`/`off` keywords |
+| D4 | Units & literals | **Decided** | `5min`, `50%`, `22:00`, `sunset - 30min` |
+| D5 | Binding operator & targets | **Decided** (one writer, `keep`) / Open (operator, writers) | `=`, per-domain writers, `on(attr: …)`, `keep` |
 | D6 | Priority cascades | **Decided** | `cond -> value` arms, `\|` for guarded sub-arms, first match wins, `else` required in bindings |
 | D7 | Event sources | Proposed | timestamp signals; table in §9 |
-| D8 | Event-type filter | Open | `event.remote.double_press` |
+| D8 | Event-type filter | **Decided** | `event.remote.double_press` |
 | D9 | Events | **Decided** | no event type: events are timestamp-valued state, as in HA |
 | D10 | Recency | **Decided** | `age(x)`: time since `x` last changed |
-| D11 | Temporal sugar | **Decided** (`for`) / Proposed | `x for D` = `x and age(x) >= D`; `until` = two-arm `latest`; `debounced`, `min_on` |
-| D12 | Time | Proposed / **Decided** (time points) | `now in 22:00..06:00` ranges; `fresh(07:00)`: a bare time is a time point |
+| D11 | Temporal sugar | **Decided** (`for`) / Open (`until`, debounce, `min_on`) | `x for D` = `x and age(x) >= D`; `until` = two-arm `latest`; `debounced`, `min_on` |
+| D12 | Time | **Decided** | `now in 22:00..06:00` ranges; `fresh(07:00)`: a bare time is a time point |
 | D13a | State machine shape | **Decided (provisional)** | `state m = init:` + arms (TEA reducer); revisit after real use |
 | D13b | State machine semantics | **Decided** | arms are level-triggered conditions; chains with loop detection; restarts just re-evaluate |
 | D13c | Referring to states | **Decided** | string comparison, compile-time checked |
 | D13d | Visibility in HA | **Decided** | writable `select.ha_dsl_<name>` |
 | D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; catch-up capped at 1h (proposed) |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `age(manual(x)) < D -> keep` |
-| D16 | Unknown handling | Proposed | Kleene logic, unknown → keep, change times skip dropouts |
+| D16 | Unknown handling | **Decided** | Kleene logic, unknown → keep, change times skip dropouts |
 | D17 | Startup | Proposed | write only if different from persisted last value |
 | D18 | Abstraction | Open (v2) | compile-time templates |
 | D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `cond -> value` arms |
