@@ -387,7 +387,7 @@ calling services. Bindings still update `last_known_result` as if they had writt
 
 **Tooling.** `pytest` with `asyncio_mode = auto`; `ruff` for lint/format. CI
 (`.github/workflows/tests.yml`) runs ruff and the full test suite on Python 3.14 with the latest
-HA. Still to add before a release: `hassfest` and the HACS action.
+HA; `.github/workflows/validate.yml` runs `hassfest` and the HACS action.
 
 ---
 
@@ -406,7 +406,7 @@ Last updated at the end of session 1, when PR ddfisher/ha-homeo#1 was merged int
 | M5 | HA integration | **First version done** (see below); a few polish items remain. |
 | M6 | Tooling | **Not started.** `homeo.explain` and the optional diagnostic sensor. Dry run is done (I20). |
 | M7 | Editor panel | **Not started.** Research notes §15 has the HA APIs. |
-| — | Release | **Partly done:** `hacs.json`, MIT license, brand icon, README and a test workflow exist. Missing: `hassfest` and HACS action in CI, a GitHub release. |
+| — | Release | **Partly done:** `hacs.json`, MIT license, brand icon, README, tests and validation (`hassfest`, HACS) in CI. Missing: a GitHub release. |
 
 M5 as built:
 - **Setup:** single-instance config flow with a dry-run option. Rules are compiled once HA has
@@ -439,8 +439,7 @@ M5 as built:
   restart, the machine restored with its change time, `for` waiting its full time, and no action
   re-firing. It found one bug: service calls to domains without entities
   (`persistent_notification.create`) didn't compile.
-- **Not yet done:** running Homeo with real physical devices; running `hassfest` and the HACS
-  validation.
+- **Not yet done:** running Homeo with real physical devices.
 
 ### Known limitations and open questions
 
@@ -475,7 +474,9 @@ M5 as built:
 
 1. ~~Try it in a real HA instance~~ (done with the demo devices; `tools/real_ha.py`). Trying
    it with real physical devices is still worthwhile.
-2. Add `hassfest` and the HACS action to CI; add a test for removing stale `select` entities.
+2. ~~Add `hassfest` and the HACS action to CI; add a test for removing stale `select`
+   entities~~ (done; `hassfest` also passes when run locally from HA core's source). The HACS
+   action ignores the repository's description and topics until they're set on GitHub.
 3. M6: `homeo.explain` (per-subexpression values, the active arm, sugar expanded). The IR's
    `text` fields and the cells' change times are the raw material.
 4. M7: the editor panel.

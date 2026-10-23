@@ -5,6 +5,7 @@ from datetime import timedelta
 
 import pytest
 from homeassistant.core import Context, HomeAssistant, State
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
@@ -156,6 +157,30 @@ async def test_state_machine_select_entity(hass: HomeAssistant, setup_homeo, fre
     await hass.async_block_till_done()
     assert entry.runtime_data.runtime.machine_value("bath_mode") == "auto"
     assert hass.states.get("select.homeo_bath_mode").state == "auto"
+
+
+async def test_removed_machine_removes_its_select_entity(
+    hass: HomeAssistant, setup_homeo, rules_dir
+):
+    hass.states.async_set("input_button.boost", "unknown")
+    entry = await setup_homeo({"bath.homeo": MACHINE})
+    registry = er.async_get(hass)
+    assert registry.async_get("select.homeo_bath_mode") is not None
+
+    renamed = MACHINE.replace("bath_mode", "bath")
+    (rules_dir / "bath.homeo").write_text(renamed)
+    await entry.runtime_data.async_reload()
+    await hass.async_block_till_done()
+    assert hass.states.get("select.homeo_bath_mode") is None
+    assert registry.async_get("select.homeo_bath_mode") is None
+    assert hass.states.get("select.homeo_bath").state == "auto"
+
+    # and it comes back with the same entity id when the machine does
+    (rules_dir / "bath.homeo").write_text(MACHINE)
+    await entry.runtime_data.async_reload()
+    await hass.async_block_till_done()
+    assert hass.states.get("select.homeo_bath_mode").state == "auto"
+    assert hass.states.get("select.homeo_bath") is None
 
 
 async def test_state_machine_restored_with_change_time(hass: HomeAssistant, setup_homeo, freezer):
