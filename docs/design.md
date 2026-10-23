@@ -3,7 +3,7 @@
 Status: **ready for implementation (v1).** Every decision has an ID (`D1`, `D2`, …) and is
 listed in the decision log (§22). Two are marked *provisional*, to revisit once real rules have
 been written: the state machine shape (D13a) and bare times as time points (D12). Alternatives we
-compared are kept in the appendices.
+compared are kept in the appendix.
 
 **Homeo** (from *homeostasis*: a system that keeps itself in balance). Rule files use `.homeo`,
 and the integration's domain is `homeo`.
@@ -27,7 +27,9 @@ and the integration's domain is `homeo`.
 4. writers;
 5. the HA integration: host adapter, file watching, reloads, `select` entities, errors as repairs
    issues;
-6. tooling (`homeo.explain`, dry run).
+6. tooling (`homeo.explain`, dry run);
+7. **finally:** an editor in HA's UI for `.homeo` files, with syntax highlighting and inline
+   errors (§19).
 
 ---
 
@@ -125,7 +127,8 @@ but adds what Python can't express: `5min`, `50%`, `22:00`, `for`, `let`, `:=`, 
 
 Rejected: strict Python syntax parsed with `ast` plus a token pre-pass. Every temporal form would
 need a pre-pass hack or turn into a function call. A hand-written parser also gives better error
-messages. We can ship a VS Code / TextMate grammar later.
+messages. The in-HA editor (§19) provides syntax highlighting; a VS Code / TextMate grammar can
+follow later.
 
 ---
 
@@ -837,6 +840,16 @@ with no runtime cost. Leaving this out of v1 is fine.
 - Optional diagnostic sensor per binding, whose attributes hold the active arm and reason.
 - Service calls carry a `Context` that HA's logbook attributes to homeo and the rule's
   file:line.
+- **Editor in HA's UI** (the final v1 step). A Homeo sidebar panel lists the `.homeo` files and
+  edits them with:
+  - **syntax highlighting** for the language;
+  - **inline errors:** the panel sends the text to the integration, which compiles it without
+    loading it and returns errors with line and column. These are shown as squiggles and
+    messages in the editor as you type;
+  - **save** writes the file, which triggers the normal (atomic) reload.
+
+  Implementation details (editor component, API between panel and integration) are left to
+  that step.
 
 ---
 
@@ -936,7 +949,7 @@ on humidity > 90% for 30min:
 
 ---
 
-## Appendix A: alternatives considered
+## Appendix: alternatives considered
 
 ### A1. Cascade layouts (D6)
 
@@ -971,24 +984,3 @@ Treating events as timestamp-valued state, as HA does, removed all three.
 - `x after y` (generic "changed more recently than"): replaced by `latest` blocks for
   last-wins logic and `fresh()` inside state machines.
 - `new x`: renamed `fresh(x)`, because `new` means something very different in most languages.
-
----
-
-## Appendix B: name candidates (D0)
-
-**Chosen: Homeo.** `homeo` was free on PyPI when checked (2026-10). The other candidates:
-
-| Name | Extension | Why |
-|---|---|---|
-| **Homeo** | `.homeo` | *Homeostasis*: a system that keeps itself in balance, which is what declarative rules do. "Your home, in balance." |
-| **HAbit** | `.habit` | **HA** + habit: teach your house good habits. |
-| **Ohm** | `.ohm` | "Ohm sweet ohm." Electrical, short, calm. |
-| **Hamlet** | `.hamlet` | **HA** + a small home. On/off is "2B or not 2B". |
-| **Dwell** | `.dwell` | A dwelling, and *dwell time* (`motion for 5min`). |
-| **Homespun** | `.spun` | Handmade and cosy; rules "spun" for your home. |
-| **HAven** | `.haven` | **HA** + a safe, calm home. |
-| **Domo** | `.domo` | *Domotics* (home automation), and a friendly "domo arigato". |
-| **Tend** | `.tend` | You tend a home; rules tend it for you. |
-| **Hygge** | `.hygge` | Danish cosiness. Friendly, but people may struggle to spell it. |
-| **Homebody** | `.homebody` | Friendly, a little silly. |
-| **HAiku** | `.haiku` | **HA** + short poems for your home. Clashes with Haiku OS. |
