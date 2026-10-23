@@ -13,11 +13,13 @@ integration (installable via HACS). It watches `.homeo` rule files, compiles the
 drives devices through HA service calls.
 
 **How this document came about.** The project owner and Claude wrote it over a long design
-conversation. The owner made every decision in the log (§22). The repository contains only this
-document; implementation starts from scratch. Read "Handoff notes" below before starting.
+conversation. The owner made every decision in the log (§22). Read "Handoff notes" below before
+working on the code.
 
-Status: **ready for implementation (v1).** Every decision has an ID (`D1`, `D2`, …) and is
-listed in the decision log (§22). Two are marked *provisional*, to revisit once real rules have
+Status: **v1 implementation in progress.** Build steps 1–4 are done and step 5 has a first
+version; see "Implementation status" in `docs/implementation-plan.md` (§6) for what works, what
+was verified, and what's next. Every decision has an ID (`D1`, `D2`, …) and is listed in the
+decision log (§22). Two are marked *provisional*, to revisit once real rules have
 been written: the state machine shape (D13a) and bare times as time points (D12). Alternatives we
 compared are kept in the appendix.
 
@@ -112,9 +114,9 @@ Verify these against the current HA version when implementing.
 - **HACS:** the repository needs a `hacs.json` and the integration in `custom_components/homeo/`,
   with a `manifest.json`.
 
-### Suggested code layout
+### Code layout
 
-Not decided; adjust freely.
+As built, see `docs/implementation-plan.md` §1. The original suggestion, which it follows:
 
 - **A host-agnostic core package** (lexer, parser, checker, runtime) that imports nothing from HA.
   Unit-test it with a fake host and a simulated clock. The host interface sketched during
@@ -158,10 +160,12 @@ These weren't discussed. Decide each one, document it here, and flag it to the o
   - `sunrise`/`sunset` while `sun.sun` is unavailable.
 - **Output details:** the wording of error messages, and the dry-run configuration format.
 
-### Implementation decisions (gaps settled; for the owner to review)
+### Implementation decisions (gaps settled)
 
-Settled during implementation. Details and rationale are in `docs/implementation-plan.md`
-(IDs match); verified HA facts are in `docs/research-notes.md`.
+Settled during implementation and reviewed by the owner: all accepted, except that restart
+handling was changed to follow D17 as written (I1 below reflects the change). Details and
+rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts are in
+`docs/research-notes.md`.
 
 | ID | Gap | Decision |
 |---|---|---|
@@ -189,8 +193,10 @@ Settled during implementation. Details and rationale are in `docs/implementation
 ### Repository state
 
 - **Repository name:** the GitHub repo is `ddfisher/ha-homeo` (formerly `ddfisher/ha-dsl`).
-- **Branches:** `main` holds only this document. Early prototypes (pyscript code generation, and a
-  Python operator-overloading library) were deleted. They survive only in the history of the
+- **Code:** `main` holds the implementation (`custom_components/homeo/`, tests in `tests/`),
+  this document, `docs/research-notes.md` and `docs/implementation-plan.md`.
+- **Old prototypes:** early prototypes (pyscript code generation, and a Python
+  operator-overloading library) survive only in the history of the
   `claude/upbeat-hawking-3wnqwd` branch. They use superseded syntax and approaches; don't build
   on them.
 

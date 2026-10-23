@@ -14,8 +14,9 @@ changes. It's a custom integration: it watches `<config>/homeo/*.homeo`, compile
 inside Home Assistant and drives devices through service calls.
 
 **Status: early development.** The language core and a first version of the integration
-work; the editor panel and `homeo.explain` aren't built yet. See
-[`docs/implementation-plan.md`](docs/implementation-plan.md) for progress.
+work and are tested against Home Assistant's test harness, but haven't been tried on a real
+Home Assistant instance yet. `homeo.explain` and the editor panel aren't built. See
+"Implementation status" in [`docs/implementation-plan.md`](docs/implementation-plan.md#6-implementation-status-handoff).
 
 ## Docs
 

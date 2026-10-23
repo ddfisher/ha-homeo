@@ -12,29 +12,32 @@ spec left gaps. Each such decision has an ID (`I1`, `I2`, …), is summarised in
 ```
 custom_components/homeo/
   manifest.json, hacs-facing metadata, strings.json, translations/en.json, services.yaml, brand/
-  __init__.py        config-entry setup and services (homeo.reload, homeo.explain)
-  manager.py         compiling, atomic reloads, repairs issues
+  __init__.py        config-entry setup and the homeo.reload service (HA imported lazily)
+  manager.py         compiling, atomic reloads, repairs issues, boot time, select entities
   watcher.py         file watcher (watchdog/inotify) for <config>/homeo/*.homeo
-  config_flow.py     single-instance config flow
-  host.py            HassHost: the HA implementation of the core's Host interface
+  config_flow.py     single-instance config flow, dry-run option
+  hass_host.py       HassHost: the HA implementation of the core's Host interface
   select.py          select.homeo_<name> entities for state machines (RestoreEntity)
   logbook.py         describes homeo_rule_fired events (logbook attribution)
   core/              host-agnostic; must not import homeassistant (enforced by a test)
     errors.py        Diagnostic (file, line, col, message, hint) + caret formatting
     lexer.py         tokens with line/col and per-line indentation
     ast.py           dataclass AST
+    printer.py       AST back to canonical text (messages, keys)
     parser.py        Pratt expressions + layout-aware statements and arm blocks
     types.py         static types
     checker.py       name resolution, type checking, target/writer checks, cycles → Program IR
+    ir.py            the resolved, typed program: expression nodes, cells, bindings, actions
     values.py        runtime values: Unknown, Keep, OnSpec, Days, time intervals
     timeutil.py      time-of-day, daily time points, ranges, DST handling
     writers.py       per-target service mapping and read-back matching
     runtime.py       cells, propagation, scheduling, bindings, machines, actions
     host.py          Host protocol (what the runtime needs from its environment)
 tests/
-  core/              fast unit tests with a FakeHost and simulated clock
+  core/              fast unit tests with a FakeHost and simulated clock (fakehost.py, rig.py)
   integration/       pytest-homeassistant-custom-component tests
-hacs.json
+tools/make_icon.py   draws brand/icon.png and icon@2x.png
+hacs.json, LICENSE (MIT), README.md, requirements_test.txt, .github/workflows/tests.yml
 ```
 
 The core lives inside the integration directory because HACS only ships
@@ -62,6 +65,8 @@ class Host(Protocol):
     def schedule(self, when: float, cb) -> Unsub
     def call_service(self, call: ServiceCall) -> None       # host creates + remembers the Context
     def solar(self, event: str, day: date) -> float | None  # sunrise/sunset/dawn/dusk for a local date
+    def publish_machine(self, name, value, changed_at, options) -> None  # the select entity
+    def restore_machine(self, name) -> tuple[str, float] | None          # (value, change time)
     def log(self, level, message) -> None
 ```
 
@@ -116,9 +121,9 @@ This one representation gives three things the design asks for, with no special 
   the change time of its first known value, so a device reconnecting after boot doesn't look
   like a fresh change (no motion light switched on by `age(motion) < 10min`).
 
-A bound of `−∞` together with a `maybe_never` flag represents "never happened, or happened
-before we started watching" (e.g. a bool that is false at load). `latest` takes its `else` only
-when every condition has *definitely* never happened (e.g. a button whose state is `unknown`).
+An occurrence time `[−∞, T]` means "never happened, or happened at or before T" (e.g. a bool that
+is false at load); `NEVER = [−∞, −∞]` means it definitely never happened (e.g. a button whose
+state is `unknown`). `latest` takes its `else` only when every condition is `NEVER`.
 
 ### 2.2 Cells and change times
 
@@ -372,56 +377,99 @@ calling services. Bindings still update `last_known_result` as if they had writt
 - Startup waits for `started`; time points use `async_fire_time_changed`.
 - Logbook attribution via the `homeo_rule_fired` event.
 
-**Tooling.** `pytest` with `asyncio_mode = auto`; `ruff` for lint/format. CI runs core tests on
-Python 3.13 and 3.14, and integration tests on the latest HA (Python 3.14), plus `hassfest` and
-the HACS action.
+**Tooling.** `pytest` with `asyncio_mode = auto`; `ruff` for lint/format. CI
+(`.github/workflows/tests.yml`) runs ruff and the full test suite on Python 3.14 with the latest
+HA. Still to add before a release: `hassfest` and the HACS action.
 
 ---
 
-## 6. Progress log
+## 6. Implementation status (handoff)
 
-### Session 1
+Last updated at the end of session 1, when PR ddfisher/ha-homeo#1 was merged into `main`.
 
-Done (256 tests: 245 core, 11 integration):
-- **M1** lexer + parser (`core/lexer.py`, `core/parser.py`, `core/ast.py`, `core/printer.py`).
-  All complete examples in the design parse.
-- **M2** checker (`core/checker.py`, `core/ir.py`, `core/types.py`): every compile error the
-  design names, with hints; cross-file rules via `Globals`.
-- **M3** runtime (`core/runtime.py`, `core/values.py`, `core/timeutil.py`): cells, waves,
-  wake-ups, cascades, `latest`, history functions, machines, actions, bindings, manual
-  detection, restart and reload semantics. The §21 example runs through a scripted day.
-- **M4** writers (`core/writers.py`): the full v1 table with read-back tolerances.
-- **M5 (first version)**: config flow, `HassHost`, a file watcher with debounced atomic
-  reloads, repairs issues, `select.homeo_*` entities with restore (value + change time),
-  contexts, logbook attribution, `homeo.reload`, dry-run option. MIT license and brand icon
-  (drawn by `tools/make_icon.py`).
+### Where things stand
 
-Notes from implementation:
-- Cross-file reloads: unchanged files are checked first, so a conflict between files (two
-  bindings for one target, two machines with one name) is reported in the file just edited.
-  A file with errors keeps its previous version only if that doesn't clash with files that
-  compiled; otherwise it's stopped, so two rules never drive one device (D5).
-- Self-reads: a binding reads its own target only if it reads what its writer reads back (the
-  state, or e.g. a light's `brightness`), so `climate.x := ... climate.x.current_temperature
-  ...` is fine.
-- Actions can't target bound entities through `entity_id:` service data either (constant
-  strings, possibly comma-separated).
-- After review, restart handling follows the design's D17 directly (see §2.1): change times
-  after boot are exact, `manual()` starts as never happened, and `for` on derived values waits
-  its full duration after a restart.
+| # | Milestone | Status |
+|---|---|---|
+| M1 | Lexer + parser | **Done.** Every complete example in the design parses. |
+| M2 | Checker | **Done.** Every compile error the design names, with hints; cross-file rules via `Globals`. |
+| M3 | Runtime core | **Done.** The §21 example runs through a scripted day; restarts, reloads and DST are covered. |
+| M4 | Writers | **Done.** The full v1 table with read-back tolerances (`core/writers.py`). |
+| M5 | HA integration | **First version done** (see below); a few polish items remain. |
+| M6 | Tooling | **Not started.** `homeo.explain` and the optional diagnostic sensor. Dry run is done (I20). |
+| M7 | Editor panel | **Not started.** Research notes §15 has the HA APIs. |
+| — | Release | **Partly done:** `hacs.json`, MIT license, brand icon, README and a test workflow exist. Missing: `hassfest` and HACS action in CI, a GitHub release. |
+
+M5 as built:
+- **Setup:** single-instance config flow with a dry-run option. Rules are compiled once HA has
+  started.
+- **Files:** `<config>/homeo/*.homeo` is watched with `watchdog` (inotify), with a 0.5 s debounce
+  because editors save in several steps; if inotify can't be set up, it falls back to checking
+  every 2 s. Reloads are atomic per file: errors become a Repairs issue and the previous
+  version keeps running. Files with errors are retried when an entity appears (late-loading
+  integrations).
+- **Cross-file reloads:** unchanged files are checked first, so a conflict between files is
+  reported in the file just edited. A broken file keeps its previous version only if that
+  doesn't clash with the files that compiled, so two rules never drive one device (D5).
+- **State machines:** `select.homeo_<name>` entities that restore value and change time, and can
+  be set from the UI.
+- **Other:** service calls carry homeo's context; the logbook shows the rule behind each change;
+  `homeo.reload` service.
+
+### What has been verified, and what hasn't
+
+- 273 tests: 259 core (FakeHost, simulated clock), 14 integration
+  (`pytest-homeassistant-custom-component`). They pass on HA 2026.10.2 / Python 3.14 (the CI
+  setup) and on HA 2026.2.3 / Python 3.13 (the minimum in `hacs.json`). The full suite passed
+  100 consecutive runs after the watcher's shutdown races were fixed.
+- **Not yet done:** running Homeo in a real Home Assistant instance with real devices; running
+  `hassfest` and the HACS validation. Do these before a first release.
+
+### Known limitations and open questions
+
+- A failed service call isn't retried, except that a device returning from `unavailable`
+  gets its state compared with the rule again (§2.5).
+- Lists aren't allowed in service data (`entity_id: ["a", "b"]`); only after `in`. Use a
+  comma-separated string. An unquoted entity in service data (`entity_id: light.hall`) sends
+  the entity's *state*, not its id.
+- Reloading the config entry (not a rule file) restarts the runtime: bindings forget their last
+  results and actions their last-handled times, as after an HA restart. The boot time is kept.
+- `latest` over bool conditions that were false at load is `unknown` until one of them happens
+  (I1). In the §21 example, `co2_high` is unknown until co2 crosses 700 or 800, as the design's
+  comment says.
 - The "`else` required" rule applies to blocks written directly in a binding; a binding that
   uses a `let` holding a `latest` without `else` gets `unknown` (→ keep) until a condition
   happens.
-- A `latest` without `else` whose conditions all date from before load is `unknown` until one
-  of them happens (I1). In the §21 example, `co2_high` is unknown until co2 crosses 700 or 800,
-  as the design's comment says.
+- Restart handling follows D17 as written (§2.1): change times after boot are exact, `manual()`
+  starts as never happened (a pre-restart manual change is overridden), and `for` on derived
+  values waits its full duration after a restart. Owner decision; don't add restart-specific
+  machinery.
+- Review suggestions deferred on purpose (PR #1 threads, left open):
+  - merge similar cell kinds (`EveryCell`/`TimePointCell`; the stored-timestamp cells): revisit
+    when building `homeo.explain`;
+  - typed per-kind fields instead of `RCell.extra`: revisit with the cell kinds;
+  - registering `homeo.reload` in `async_setup`: needs a top-level `CONFIG_SCHEMA`, which
+    conflicts with importing the core without HA.
 
-Next:
-- M5 polish: tests for stale `select` entity cleanup, and hassfest/HACS CI checks before a
-  first release.
-- Rule files are watched with `watchdog` (inotify), with a 0.5 s debounce because editors save
-  in several steps; if inotify isn't available it falls back to checking every 2 s.
-- Rules are compiled once HA has started; files with errors are retried whenever the set of
-  entities changes, so rules referencing entities from late-loading integrations recover on
-  their own.
-- M6 tooling, M7 editor panel.
+### Next steps, in order
+
+1. Try it in a real HA instance with a few real rules; fix what that turns up.
+2. Add `hassfest` and the HACS action to CI; add a test for removing stale `select` entities.
+3. M6: `homeo.explain` (per-subexpression values, the active arm, sugar expanded). The IR's
+   `text` fields and the cells' change times are the raw material.
+4. M7: the editor panel.
+5. First GitHub release.
+
+### Working on the code
+
+```sh
+uv venv --python 3.14 && uv pip install -r requirements_test.txt
+.venv/bin/pytest                                   # all tests (~3 s)
+.venv/bin/ruff check custom_components tests tools && .venv/bin/ruff format --check custom_components tests tools
+.venv/bin/python tools/make_icon.py               # redraw the brand icon
+```
+
+Reading order for a newcomer: `docs/design.md` (the spec), this document (§1 layout, §2 runtime
+model, §3 decisions), then `core/checker.py` and `core/runtime.py`. Runtime behaviour is
+easiest to learn from `tests/core/test_runtime.py`, whose scenarios are grouped by design
+section.
