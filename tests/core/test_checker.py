@@ -575,3 +575,10 @@ def test_action_service_data_cant_target_bound_entity(host):
         'light.porch := on\non input_button.doorbell:\n    light.turn_off(entity_id: "light.porch")\n',
     )
     assert "driven by a binding" in d.message
+
+
+def test_solar_times_need_sun_entity(host):
+    del host.states["sun.sun"]
+    d = err(host, "light.porch := now in sunset..sunrise")
+    assert "needs the `sun.sun` entity" in d.message and "Sun integration" in d.hint
+    ok(host, "light.porch := now in 22:00..06:00")  # fixed times don't

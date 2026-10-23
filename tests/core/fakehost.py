@@ -101,11 +101,44 @@ class FakeHost:
         if self.simulate_devices and call.entity_id:
             self.simulate(call)
 
-    def solar(self, event: str, day: date) -> float | None:
-        t = self.solar_times.get(event)
-        if t is None:
-            return None
-        return datetime.combine(day, t, tzinfo=self.tz).timestamp()
+    # ------------------------------------------------------------ sun.sun
+
+    SUN_ATTRS = {
+        "sunrise": "next_rising",
+        "sunset": "next_setting",
+        "dawn": "next_dawn",
+        "dusk": "next_dusk",
+    }
+
+    def solar_at(self, event: str, day: date) -> float:
+        """When `event` happens on a local date, in this fake world (fixed local times)."""
+        return datetime.combine(day, self.solar_times[event], tzinfo=self.tz).timestamp()
+
+    def start_sun(self) -> None:
+        """Run a `sun.sun` entity like HA's: it shows the *next* occurrence of each event and
+        recomputes them when one passes."""
+        self._sun_cancel = None
+        self._update_sun(self.t)
+
+    def _update_sun(self, _when: float) -> None:
+        today = self.local_now().date()
+        nexts = {}
+        for event in self.SUN_ATTRS:
+            nexts[event] = min(
+                t
+                for d in range(-1, 3)
+                if (t := self.solar_at(event, today + timedelta(days=d))) > self.t
+            )
+        up = nexts["sunset"] < nexts["sunrise"]
+        attrs = {attr: self.iso(nexts[e]) for e, attr in self.SUN_ATTRS.items()}
+        self.set_state("sun.sun", "above_horizon" if up else "below_horizon", attrs)
+        self._sun_cancel = self.schedule(min(nexts.values()), self._update_sun)
+
+    def stop_sun(self) -> None:
+        """Make sun.sun unavailable (and stop updating it)."""
+        if self._sun_cancel:
+            self._sun_cancel()
+        self.set_state("sun.sun", "unavailable")
 
     def publish_machine(self, name, value, changed_at, options):
         self.machines[name] = (value, changed_at, list(options))
@@ -305,6 +338,7 @@ def standard_world(host: FakeHost | None = None) -> FakeHost:
             "select.homeo_other": ("a", {"options": ["a", "b"]}),
         },
     )
+    h.start_sun()
     h.registry.add("light.disabled_one")
     h.services[("notify", "mobile_app_phone")] = True
     h.services[("light", "turn_on")] = True

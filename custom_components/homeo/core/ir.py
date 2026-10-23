@@ -113,6 +113,7 @@ class InTimeRange(Node):
     start: Any = None  # DailyTime
     end: Any = None  # DailyTime
     negate: bool = False
+    sun: CellDef | None = None  # set when an end is a solar time
 
 
 @dataclass(eq=False, slots=True)
@@ -224,6 +225,17 @@ class EveryCell(CellDef):
 @dataclass(eq=False, slots=True)
 class TimePointCell(CellDef):
     daily: Any = None  # DailyTime
+    sun: CellDef | None = None  # set for solar times
+
+    def deps(self) -> list[CellDef]:
+        return [self.sun] if self.sun is not None else []
+
+
+@dataclass(eq=False, slots=True)
+class SunCell(CellDef):
+    """Solar times from `sun.sun` (core/sun.py). Its value changes only when they do."""
+
+    entity_id: str = "sun.sun"
 
 
 @dataclass(eq=False, slots=True)
@@ -391,6 +403,8 @@ def node_cells(n: Node) -> list[CellDef]:
             case Fresh(cell=c, machine=m):
                 out.append(c)
                 out.append(m)
+            case InTimeRange(sun=sun) if sun is not None:
+                out.append(sun)
         for ch in children(x):
             visit(ch)
 

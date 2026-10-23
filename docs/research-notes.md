@@ -172,9 +172,13 @@ Conversion facts:
   `get_astral_event_next(hass, event, utc_point_in_time, offset)` gives the next one. These use
   `hass.config` latitude/longitude/elevation and don't need the `sun` integration.
 
-**→ implication (spec gap "sunset while sun.sun is unavailable"):** compute solar times from
-`hass.config` via `helpers/sun.py`, not from `sun.sun`. They're then always available; a day
-with no sunset makes that day's occurrence `unknown`.
+**→ implication:** read solar times from `sun.sun` as the design says (D4; the owner's call,
+since the Sun integration is set up by default), and remember each occurrence as `sun.sun`
+moves past it, because only the next one is published. `sun.sun` recomputes all `next_*`
+attributes when the earliest event passes (`components/sun/entity.py`, `update_events`), and
+its elevation/azimuth attributes change every few minutes, so only changes to `next_*` should
+count. If `sun.sun` is unavailable, solar times are `unknown`. (The astral helpers above
+compute any day's events, but would bypass the entity.)
 
 ## 9. Startup
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import Context, Event, EventStateChangedData, HomeAssistant, State, callback
@@ -15,7 +15,6 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
 )
 from homeassistant.helpers.restore_state import async_get as async_get_restore_data
-from homeassistant.helpers.sun import get_astral_event_date
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, EVENT_RULE_FIRED, MACHINE_UNIQUE_ID_PREFIX
@@ -149,10 +148,6 @@ class HassHost:
                 f" on {call.entity_id}" if call.entity_id else "",
                 exc,
             )
-
-    def solar(self, event: str, day: date) -> float | None:
-        dt = get_astral_event_date(self.hass, event, day)
-        return dt.timestamp() if dt is not None else None
 
     def publish_machine(self, name: str, value: str, changed_at: float, options: list[str]) -> None:
         self.manager.publish_machine(name, value, changed_at, options)

@@ -72,6 +72,8 @@ class Rig:
         for eid, st in list(self.h.states.items()):
             self.h.set_state(eid, st.state, st.attributes, notify=False, last_changed=self.h.t)
             self.h.states[eid] = type(st)(eid, st.state, st.attributes, self.h.t, self.h.t)
+        if "sun.sun" in self.h.states:
+            self.h.start_sun()  # recomputed at boot, like HA's
         self.rt = Runtime(self.h)
         self.rt.load(self.compile())
         self.rt.start()
