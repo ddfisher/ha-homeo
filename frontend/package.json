@@ -1,0 +1,24 @@
+{
+  "name": "homeo-panel",
+  "private": true,
+  "description": "The Homeo editor panel for Home Assistant (built into custom_components/homeo/frontend/)",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/homeo-panel.js --bundle --format=esm --minify --target=es2022 --legal-comments=none --outfile=../custom_components/homeo/frontend/homeo-panel.js",
+    "test": "node --test test/*.test.js",
+    "e2e": "node e2e/panel.mjs"
+  },
+  "devDependencies": {
+    "@codemirror/autocomplete": "^6.18.0",
+    "@codemirror/commands": "^6.8.0",
+    "@codemirror/language": "^6.11.0",
+    "@codemirror/lint": "^6.8.0",
+    "@codemirror/search": "^6.5.0",
+    "@codemirror/state": "^6.5.0",
+    "@codemirror/view": "^6.36.0",
+    "@lezer/highlight": "^1.2.0",
+    "esbuild": "^0.28.0",
+    "playwright": "^1.64.1"
+  }
+}

@@ -8,6 +8,12 @@ like real ones, restore state, the real file watcher) and drives it in real time
     /tmp/realha-venv/bin/python tools/real_ha.py /tmp/realha-config            # first boot
     /tmp/realha-venv/bin/python tools/real_ha.py /tmp/realha-config restart    # restart
 
+`serve` instead runs HA with its frontend on http://127.0.0.1:8123 until stopped, with an admin
+user whose access token it writes to `<config>/token.json`, for the editor panel's browser test
+(`frontend/e2e/panel.mjs`):
+
+    /tmp/realha-venv/bin/python tools/real_ha.py /tmp/realha-serve serve
+
 HA installs the demo integration's other requirements on the first run (this takes a while).
 Use a separate venv: they don't all install into the test venv. The config directory is
 created if needed; use a fresh one for a first boot. Exits non-zero if a check fails.
@@ -16,6 +22,7 @@ created if needed; use a fresh one for a first boot. Exits non-zero if a check f
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -112,9 +119,9 @@ def state(hass: HomeAssistant, entity_id: str, attr: str | None = None) -> objec
     return st.state if attr is None else st.attributes.get(attr)
 
 
-def prepare(config: Path, first: bool) -> None:
+def prepare(config: Path, first: bool, configuration: str = CONFIGURATION) -> None:
     config.mkdir(parents=True, exist_ok=True)
-    (config / "configuration.yaml").write_text(CONFIGURATION)
+    (config / "configuration.yaml").write_text(configuration)
     custom = config / "custom_components"
     custom.mkdir(exist_ok=True)
     link = custom / "homeo"
@@ -237,6 +244,86 @@ async def main(config: Path, restart: bool) -> None:
     log("done:", f"{len(failures)} failed check(s)" if failures else "all checks passed")
 
 
+SERVE_RULES = {
+    "bathroom.homeo": """# Bathroom
+let co2    = input_number.co2
+let stuffy = co2 > 800
+let night  = now in 22:00..07:00
+
+state bath_mode = "auto":
+    fresh(input_button.boost)
+        | bath_mode == "auto"       -> "boost"
+        | else                      -> "auto"
+    bath_mode == "boost" for 30min  -> "auto"
+
+fan.ceiling_fan :=
+    age(manual(fan.ceiling_fan)) < 1h   -> keep
+    bath_mode == "boost"                -> on(percentage: 100%)
+    stuffy                              -> on(percentage: 60%)
+    else                                -> off
+
+light.bed_light :=
+    input_boolean.goodnight     -> off
+    night                       -> on(brightness: 10%, kelvin: 2200)
+    else                        -> on(brightness: 80%, kelvin: 2700)
+
+on input_button.movie:
+    persistent_notification.create(message: "Movie time", notification_id: "movie")
+""",
+    "garage.homeo": "switch.ac := sensor.outside_temperature > 25\n",
+}
+
+
+async def serve(config: Path) -> None:
+    """HA with its frontend, for the editor panel's browser test."""
+    first = not (config / ".storage" / "core.config_entries").exists()
+    prepare(config, False, CONFIGURATION + "frontend:\nhttp:\n  server_port: 8123\n")
+    if first:
+        for name, text in SERVE_RULES.items():
+            (config / "homeo" / name).write_text(text)
+        (config / ".storage").mkdir(exist_ok=True)
+        done = ["user", "core_config", "analytics", "integration"]
+        (config / ".storage" / "onboarding").write_text(
+            json.dumps(
+                {"version": 4, "minor_version": 1, "key": "onboarding", "data": {"done": done}}
+            )
+        )
+    hass = await bootstrap.async_setup_hass(
+        runner.RuntimeConfig(config_dir=str(config), log_file=str(config / "ha.log"))
+    )
+    assert hass is not None
+    await hass.async_start()
+    for _ in range(300):
+        if hass.state is CoreState.running:
+            break
+        await asyncio.sleep(0.2)
+    if not hass.config_entries.async_entries("homeo"):
+        flow = await hass.config_entries.flow.async_init("homeo", context={"source": "user"})
+        await hass.config_entries.flow.async_configure(flow["flow_id"], {})
+    users = [u for u in await hass.auth.async_get_users() if u.name == "Owner"]
+    user = (
+        users[0]
+        if users
+        else await hass.auth.async_create_user("Owner", group_ids=["system-admin"])
+    )
+    client_id = "http://127.0.0.1:8123/"
+    refresh = await hass.auth.async_create_refresh_token(user, client_id=client_id)
+    token = {
+        "access_token": hass.auth.async_create_access_token(refresh),
+        "refresh_token": refresh.token,
+        "token_type": "Bearer",
+        "expires_in": 1800,
+        "hassUrl": "http://127.0.0.1:8123",
+        "clientId": client_id,
+    }
+    (config / "token.json").write_text(json.dumps(token))
+    log("ready on http://127.0.0.1:8123 (token in token.json)")
+    await asyncio.Event().wait()
+
+
 if __name__ == "__main__":
-    asyncio.run(main(Path(sys.argv[1]).resolve(), len(sys.argv) > 2 and sys.argv[2] == "restart"))
+    mode = sys.argv[2] if len(sys.argv) > 2 else ""
+    if mode == "serve":
+        asyncio.run(serve(Path(sys.argv[1]).resolve()))
+    asyncio.run(main(Path(sys.argv[1]).resolve(), mode == "restart"))
     sys.exit(1 if failures else 0)

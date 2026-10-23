@@ -15,7 +15,7 @@ inside Home Assistant and drives devices through service calls.
 
 **Status: early development.** The language core and the integration work, are tested
 against Home Assistant's test harness and have been run in a full Home Assistant with its demo
-devices, but not yet with real ones. The editor panel isn't built. See
+devices, but not yet with real ones. See
 "Implementation status" in [`docs/implementation-plan.md`](docs/implementation-plan.md#6-implementation-status-handoff).
 
 ## Docs
@@ -31,8 +31,10 @@ devices, but not yet with real ones. The editor panel isn't built. See
 1. Copy `custom_components/homeo` into your Home Assistant `config/custom_components/`
    (or add this repo to HACS as a custom repository).
 2. Restart Home Assistant and add the **Homeo** integration (Settings → Devices & services).
-3. Put rule files in `config/homeo/`, e.g. `config/homeo/bathroom.homeo`. Saving a file reloads
-   it; errors show up under Settings → Repairs, and the previous version keeps running.
+3. Open **Homeo** in the sidebar (admins only) to create and edit rule files, with highlighting
+   and errors shown as you type. Or put files in `config/homeo/` yourself, e.g.
+   `config/homeo/bathroom.homeo`. Saving a file reloads it; errors show up in the editor and
+   under Settings → Repairs, and the previous version keeps running.
 
 ## A taste
 
@@ -59,7 +61,8 @@ on humidity > 90% for 30min:
 
 ## Why is it doing that?
 
-Call the `homeo.explain` action (Developer tools → Actions) with a target: a bound entity
+In the editor, put the cursor on a rule and press **Explain**. Or call the `homeo.explain`
+action (Developer tools → Actions) with a target: a bound entity
 (`fan.bathroom`), an attribute target (`climate.living.temperature`), a state machine
 (`bath_mode`) or a `let` name. The response says what the rule wants and why, arm by arm:
 
@@ -95,7 +98,8 @@ uv venv --python 3.14 && uv pip install -r requirements_test.txt
 The language core (`custom_components/homeo/core/`) doesn't import Home Assistant and is
 tested against a fake host with a simulated clock (`tests/core/`). Integration tests use
 `pytest-homeassistant-custom-component` (`tests/integration/`). `tools/real_ha.py` is a slower
-smoke test in a full Home Assistant with demo devices.
+smoke test in a full Home Assistant with demo devices. The editor panel's source is in
+[`frontend/`](frontend/README.md).
 
 ## License
 

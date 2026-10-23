@@ -16,8 +16,8 @@ drives devices through HA service calls.
 conversation. The owner made every decision in the log (§22). Read "Handoff notes" below before
 working on the code.
 
-Status: **v1 implementation in progress.** Build steps 1–5 are done and step 6
-(`homeo.explain`) has a first version; see "Implementation status" in `docs/implementation-plan.md` (§6) for what works, what
+Status: **v1 implementation complete; not yet released.** All seven build steps have a
+first version, including the editor panel; see "Implementation status" in `docs/implementation-plan.md` (§6) for what works, what
 was verified, and what's next. Every decision has an ID (`D1`, `D2`, …) and is listed in the
 decision log (§22). Two are marked *provisional*, to revisit once real rules have
 been written: the state machine shape (D13a) and bare times as time points (D12). Alternatives we
@@ -190,6 +190,7 @@ rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts ar
 | I19 | Error format | `file:line:col: error: …`, caret snippet, optional `hint:` |
 | I20 | Dry run | `# mode: dry_run` directive or an integration option; logs would-be calls |
 | I21 | `homeo.explain` | A service with a response; target = binding target, entity, machine or `let` name; per arm: condition value, subexpression values (sugar expanded, `let` names kept), active arm; plus summary, device state, last write |
+| I22 | Editor panel | CodeMirror 6, bundled into one committed module (HACS ships only `custom_components/homeo/`); admin-only websocket API (`homeo/files`, `file/read`, `file/check`, `file/save`, `file/delete`, `explain`); errors checked as you type against the other running files; save reloads at once; Explain for the rule under the cursor |
 
 ### Repository state
 

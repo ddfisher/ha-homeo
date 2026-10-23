@@ -19,6 +19,9 @@ custom_components/homeo/
   hass_host.py       HassHost: the HA implementation of the core's Host interface
   select.py          select.homeo_<name> entities for state machines (RestoreEntity)
   logbook.py         describes homeo_rule_fired events (logbook attribution)
+  websocket.py       websocket API for the editor panel (I22)
+  panel.py           registers the sidebar panel and serves frontend/homeo-panel.js
+  frontend/          the built panel module (from frontend/ at the repo root; committed)
   core/              host-agnostic; must not import homeassistant (enforced by a test)
     errors.py        Diagnostic (file, line, col, message, hint) + caret formatting
     lexer.py         tokens with line/col and per-line indentation
@@ -38,7 +41,9 @@ tests/
   core/              fast unit tests with a FakeHost and simulated clock (fakehost.py, rig.py)
   integration/       pytest-homeassistant-custom-component tests
 tools/make_icon.py   draws brand/icon.png and icon@2x.png
-tools/real_ha.py     smoke test in a full Home Assistant with the demo integration's devices
+tools/real_ha.py     smoke test in a full Home Assistant with the demo integration's devices;
+                     `serve` mode runs one with its frontend for the panel's browser test
+frontend/            the editor panel's source, unit tests (npm test), browser test (e2e/)
 hacs.json, LICENSE (MIT), README.md, requirements_test.txt, .github/workflows/tests.yml
 ```
 
@@ -346,6 +351,21 @@ before a restart). Explaining evaluates at the current time and changes no runti
 optional diagnostic sensor per binding (§19) isn't built: the service covers the need without
 adding entities.
 
+**I22. Editor panel** (§19). A sidebar panel "Homeo" for admins, registered when the frontend
+is loaded. The editor is CodeMirror 6 (what HA's own code editor uses) with a stream-parser
+highlighter mirroring the lexer, coloured with HA's code editor theme variables (so themes and
+dark mode apply), entity-id completion from the live states, and Ctrl/Cmd+S to save. HACS only
+ships `custom_components/homeo/`, so `frontend/` (source, tests, README) is bundled with esbuild
+into one committed module, `custom_components/homeo/frontend/homeo-panel.js` (~400 KB, 130 KB
+gzipped, nearly all CodeMirror); CI checks it matches the source. It talks to the integration
+over admin-only websocket commands (`websocket.py`): `homeo/files`, `homeo/file/read`,
+`homeo/file/check` (parse and check the text as that file, against the other running files,
+without loading), `homeo/file/save` (atomic write, then an immediate reload; a file with errors
+is saved and its previous version keeps running, as on any save), `homeo/file/delete` and
+`homeo/explain`. File names are plain names in the rules folder. Explain works on the statement
+under the cursor and explains the running version. Typing in the editor is kept from HA's
+global keyboard shortcuts, which don't recognise an editable area inside a shadow root.
+
 ---
 
 ## 4. Build order and milestones
@@ -422,7 +442,7 @@ ddfisher/ha-homeo#1 was merged into `main`.
 | M4 | Writers | **Done.** The full v1 table with read-back tolerances (`core/writers.py`). |
 | M5 | HA integration | **First version done** (see below); a few polish items remain. |
 | M6 | Tooling | **Done.** `homeo.explain` (I21) and dry run (I20). The optional diagnostic sensor isn't built (I21). |
-| M7 | Editor panel | **Not started.** Research notes §15 has the HA APIs. |
+| M7 | Editor panel | **Done** (I22). Tested in a real HA frontend with a browser (`frontend/e2e/panel.mjs`). |
 | — | Release | **Partly done:** `hacs.json`, MIT license, brand icon, README, tests and validation (`hassfest`, HACS) in CI. Missing: a GitHub release. |
 
 M5 as built:
@@ -443,7 +463,7 @@ M5 as built:
 
 ### What has been verified, and what hasn't
 
-- 294 tests: 277 core (FakeHost, simulated clock), 17 integration
+- 297 Python tests: 277 core (FakeHost, simulated clock), 20 integration
   (`pytest-homeassistant-custom-component`). They pass on HA 2026.10.2 / Python 3.14 (the CI
   setup) and on HA 2026.2.3 / Python 3.13 (the minimum in `hacs.json`). The full suite passed
   100 consecutive runs after the watcher's shutdown races were fixed.
@@ -456,6 +476,10 @@ M5 as built:
   restart, the machine restored with its change time, `for` waiting its full time, and no action
   re-firing. It found one bug: service calls to domains without entities
   (`persistent_notification.create`) didn't compile.
+- **Editor panel:** 4 frontend unit tests (`npm test`), and a browser test
+  (`frontend/e2e/panel.mjs`, Playwright) against a real HA 2026.10.2 frontend: file list,
+  highlighting, typing without triggering HA's shortcuts, inline errors, entity completion,
+  Explain, save with Ctrl+S, and the phone layout, in light and dark themes.
 - **Not yet done:** running Homeo with real physical devices.
 
 ### Known limitations and open questions
@@ -496,8 +520,9 @@ M5 as built:
    action only runs once the repository is public (it can't validate private ones), and
    ignores the description and topics until they're set on GitHub.
 3. ~~M6: `homeo.explain`~~ (done, I21).
-4. M7: the editor panel.
-5. First GitHub release.
+4. ~~M7: the editor panel~~ (done, I22).
+5. First GitHub release. Before that: try Homeo with real devices, and set the repository's
+   description and topics (and make it public) so the HACS check runs.
 
 ### Working on the code
 

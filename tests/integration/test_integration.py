@@ -2,12 +2,14 @@
 
 import asyncio
 from datetime import timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.core import Context, HomeAssistant, State
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
@@ -405,3 +407,30 @@ async def test_editor_websocket_api_needs_admin(
     await client.send_json_auto_id({"type": "homeo/files"})
     r = await client.receive_json()
     assert not r["success"] and r["error"]["code"] == "unauthorized"
+
+
+async def test_panel_registered_with_the_frontend(hass: HomeAssistant, setup_homeo):
+    assert await async_setup_component(hass, "http", {})
+    hass.config.components.add("frontend")  # the test environment has no frontend package
+    with (
+        patch.object(hass.http, "async_register_static_paths", AsyncMock()) as static,
+        patch("homeassistant.components.panel_custom.async_register_panel", AsyncMock()) as reg,
+        patch("homeassistant.components.frontend.async_remove_panel") as remove,
+    ):
+        entry = await setup_homeo({})
+        (paths,) = static.call_args.args
+        assert paths[0].url_path == "/homeo_static"
+        assert paths[0].path.endswith("custom_components/homeo/frontend")
+        kwargs = reg.call_args.kwargs
+        assert kwargs["frontend_url_path"] == "homeo"
+        assert kwargs["webcomponent_name"] == "homeo-panel"
+        assert kwargs["require_admin"] is True
+        assert kwargs["module_url"].startswith("/homeo_static/homeo-panel.js?v=")
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        remove.assert_called_once_with(hass, "homeo", warn_if_unknown=False)
+        # static paths can't be unregistered: setting up again doesn't add them twice
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert static.call_count == 1
+        assert reg.call_count == 2
