@@ -625,10 +625,7 @@ def describe(t: Token) -> str:
 
 def parse(source: str, file: str = "<rules>") -> A.File:
     """Parse a file. Raises CompileError with all syntax errors found."""
-    try:
-        return Parser(source, file).parse_file()
-    except CompileError:
-        raise
+    return Parser(source, file).parse_file()
 
 
 __all__ = ["parse", "Parser", "CompileError", "Diagnostic"]

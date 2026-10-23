@@ -1,5 +1,7 @@
 import ast
 import math
+import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -22,6 +24,16 @@ def test_core_does_not_import_home_assistant():
             elif isinstance(node, ast.ImportFrom) and node.module:
                 names = [node.module]
             assert not any(n.split(".")[0] == "homeassistant" for n in names), path.name
+
+
+def test_core_imports_without_home_assistant():
+    # The integration package's __init__ must not pull Home Assistant in either.
+    code = (
+        "import sys; sys.modules['homeassistant'] = None\n"
+        "import custom_components.homeo.core.runtime, custom_components.homeo.core.checker"
+    )
+    root = Path(__file__).parents[2]
+    subprocess.run([sys.executable, "-c", code], cwd=root, check=True)
 
 
 # ------------------------------------------------------------------- intervals

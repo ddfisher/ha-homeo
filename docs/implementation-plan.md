@@ -197,15 +197,20 @@ Per binding, the runtime keeps `last_known_result` and `last_written`:
   - then `last_known_result = R`.
 
 Reloads carry `last_known_result` and `last_written` over by target id (D17 rule 6). A failed
-service call is logged; it isn't retried.
+service call is logged; it isn't retried. But when a bound device comes back from
+`unavailable`/`unknown`, its bindings forget `last_known_result`, so the device's state stands
+in again (D16) and a write lost while it was offline is made now.
 
 ### 2.6 Manual changes (D21)
 
 The host tags each state change with `ours` (its context id is one we issued; HassHost keeps a
-bounded set). For an entity with a binding, a change is manual iff it's not ours, the new state
-doesn't match `last_written` (writer read-back with tolerance; if nothing was written yet, any
-real change counts), and neither old nor new state is `unavailable`/`unknown`. A manual change
-sets `manual(entity)` to the change time.
+bounded set). A change is manual iff it's not ours, neither old nor new state is
+`unavailable`/`unknown` or transitional (`opening`, `closing`, ...: a slow cover's progress
+reports arrive with a fresh context once HA stops reusing ours, so the change is judged when it
+settles), and, for some binding on the entity, the part that binding drives changed away from
+what it last wrote (writer read-back with tolerance; if it hasn't written yet, any change to
+it counts). Entities without bindings: any change of state counts. A manual change sets
+`manual(entity)` to the change time.
 
 ### 2.7 Actions (D14)
 
@@ -264,8 +269,11 @@ sub-arms are then a first-match cascade that picks the result. If no sub-arm mat
 doesn't count and the next most recent arm wins.
 
 **I14. Types for entities** (inferred at load from domain, then attributes):
-- bool: `binary_sensor`, `input_boolean`, `switch`, `light`, `fan`, `siren`, `automation`,
-  `remote`, `script`, `group` with on/off state;
+- bool: `automation`, `binary_sensor`, `calendar`, `fan`, `humidifier`, `input_boolean`,
+  `light`, `remote`, `schedule`, `script`, `siren`, `switch`, `update`; and `group`s or
+  entities of domains HA core doesn't have (custom integrations) whose state is `on`/`off` at
+  load (known multi-state domains like `media_player` or `climate` stay strings even when
+  `off`);
 - timestamp: `event`, `input_button`, `button`, `scene`, `sensor` with `device_class: timestamp`;
 - number: `input_number`, `number`, `counter`, `sensor` with a `unit_of_measurement` or
   `state_class`, or whose current state parses as a number;
@@ -389,6 +397,15 @@ Done (256 tests: 245 core, 11 integration):
   (drawn by `tools/make_icon.py`).
 
 Notes from implementation:
+- Cross-file reloads: unchanged files are checked first, so a conflict between files (two
+  bindings for one target, two machines with one name) is reported in the file just edited.
+  A file with errors keeps its previous version only if that doesn't clash with files that
+  compiled; otherwise it's stopped, so two rules never drive one device (D5).
+- Self-reads: a binding reads its own target only if it reads what its writer reads back (the
+  state, or e.g. a light's `brightness`), so `climate.x := ... climate.x.current_temperature
+  ...` is fine.
+- Actions can't target bound entities through `entity_id:` service data either (constant
+  strings, possibly comma-separated).
 - After review, restart handling follows the design's D17 directly (see §2.1): change times
   after boot are exact, `manual()` starts as never happened, and `for` on derived values waits
   its full duration after a restart.

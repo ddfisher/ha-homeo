@@ -71,6 +71,7 @@ class HomeoManager:
         self.runtime = Runtime(self.host)
         self.files: dict[str, RuleFile] = {}
         self.programs: dict[str, Program] = {}
+        self.sources: dict[str, str] = {}  # the text each running program was compiled from
         self.errors: dict[str, list[Diagnostic]] = {}
         self.add_select_entities: Callable[[list[Any]], None] | None = None
         self.machine_entities: dict[str, MachineSelect] = {}
@@ -182,15 +183,17 @@ class HomeoManager:
     def compile_all(self, files: dict[str, RuleFile]) -> dict[str, Program]:
         g = Globals()
         programs: dict[str, Program] = {}
-        for name, f in sorted(files.items()):
+        sources: dict[str, str] = {}
+        # Unchanged files first, so a conflict between files (two bindings for one target,
+        # two machines with one name) is reported in the file that was just edited.
+        order = sorted(files.items(), key=lambda kv: (self.sources.get(kv[0]) != kv[1].text, kv[0]))
+        broken: list[str] = []
+        for name, f in order:
             try:
                 program, reads = check(parse(f.text, name), self.host, g)
             except CompileError as err:
                 self.report(name, err.diagnostics, f.text)
-                old = self.programs.get(name)
-                if old is not None:
-                    programs[name] = old
-                    g.add(old, {})
+                broken.append(name)
                 continue
             if self.dry_run:
                 program.dry_run = True
@@ -198,10 +201,28 @@ class HomeoManager:
             for w in program.warnings:
                 _LOGGER.warning(w.format(f.text))
             programs[name] = program
+            sources[name] = f.text
             g.add(program, reads)
+        # A file with errors keeps running its previous version, unless that would now clash
+        # with a file that compiled: two rules must never drive one device (D5).
+        for name in broken:
+            old = self.programs.get(name)
+            if old is None:
+                continue
+            if clashes := g.conflicts(old):
+                _LOGGER.error(
+                    "stopped the previous version of %s, which conflicts with other files: %s",
+                    name,
+                    "; ".join(clashes),
+                )
+                continue
+            programs[name] = old
+            sources[name] = self.sources[name]
+            g.add(old, {})
         for name in list(self.errors):
             if name not in files:
                 self.clear_report(name)
+        self.sources = sources
         return programs
 
     def apply(self, programs: dict[str, Program]) -> None:

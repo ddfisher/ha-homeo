@@ -18,8 +18,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from . import ir
-from .checker import Today, parse_timestamp
-from .host import UNAVAILABLE_STATES, EntityState, Host, ServiceCall, StateChange
+from .host import (
+    TRANSITIONAL_STATES,
+    UNAVAILABLE_STATES,
+    Host,
+    ServiceCall,
+    StateChange,
+)
 from .timeutil import (
     every_last_tick,
     in_range,
@@ -34,6 +39,7 @@ from .values import (
     KEEP,
     NEVER,
     UNKNOWN,
+    Days,
     Num,
     OnSpec,
     compare,
@@ -42,6 +48,7 @@ from .values import (
     kleene_or,
     num_div,
     num_mul,
+    parse_timestamp,
     same_value,
 )
 
@@ -146,12 +153,12 @@ class Runtime:
 
     def load(self, programs: dict[str, ir.Program]) -> None:
         """Replace all programs, carrying state over by key (D17 rule 6)."""
-        self._run(("load", dict(programs)))
+        self._enqueue(("load", dict(programs)))
 
     def start(self) -> None:
         """Begin evaluating (call once HA has started, D17 rule 1)."""
         self.started = True
-        self._run(("load", dict(self.programs)))
+        self._enqueue(("load", dict(self.programs)))
 
     def stop(self) -> None:
         for u in self._unsubs:
@@ -247,7 +254,7 @@ class Runtime:
         # subscriptions
         entity_ids = sorted(set(self.entity_cells) | set(self.bindings_by_entity))
         if entity_ids:
-            self._unsubs.append(self.host.subscribe_states(entity_ids, self._on_state_change_cb))
+            self._unsubs.append(self.host.subscribe_states(entity_ids, self.on_state_change))
         for et in self.bus_cells:
             self._unsubs.append(
                 self.host.subscribe_bus(
@@ -509,8 +516,9 @@ class Runtime:
                 return v
             case ir.Now():
                 return Num(self.now, self.now, 1.0, 1.0)
-            case Today():
-                return UNKNOWN
+            case ir.Today():
+                self._wake_at(next_midnight(self.now, self.host.tz))
+                return Days(frozenset({weekday(self.now, self.host.tz)}))
             case ir.Read(cell=c):
                 return self.cells[c.key].value
             case ir.Not(operand=o):
@@ -902,9 +910,6 @@ class Runtime:
 
     # ================================================================== events
 
-    def _on_state_change_cb(self, change: StateChange) -> None:
-        self._enqueue(("state", change))
-
     def on_state_change(self, change: StateChange) -> None:
         self._enqueue(("state", change))
 
@@ -916,9 +921,6 @@ class Runtime:
         self._queue.append(item)
         if not self._busy:
             self._drain()
-
-    def _run(self, item: tuple[str, Any]) -> None:
-        self._enqueue(item)
 
     def _drain(self) -> None:
         self._busy = True
@@ -948,8 +950,14 @@ class Runtime:
             for rc in dirty:
                 if isinstance(rc.defn, ir.ManualCell):
                     rc.extra["t"] = Num.of(ch.time)
+        sinks = self.bindings_by_entity.get(ch.entity_id, [])
+        if ch.new is not None and ch.new.available and (ch.old is None or not ch.old.available):
+            # Back from unavailable: a write may have been lost while it was offline, so the
+            # device's state stands in for the previous result again (D16), as after a restart.
+            for s in sinks:
+                s.last_known = NOTHING
         # a device state can matter to a binding with no previous result
-        dirty.extend(self.bindings_by_entity.get(ch.entity_id, []))
+        dirty.extend(sinks)
         self._propagate(dirty)
 
     def _detect_manual(self, ch: StateChange) -> bool:
@@ -958,16 +966,22 @@ class Runtime:
             return False
         if not ch.old.available or not ch.new.available:
             return False
+        if ch.new.state in TRANSITIONAL_STATES:
+            # Progress reports of a slow device (a cover still moving) arrive with a fresh
+            # context once HA stops reusing ours; judge the change when it settles.
+            return False
         sinks = self.bindings_by_entity.get(ch.entity_id, [])
         if not sinks:
             return ch.old.state != ch.new.state
-        writers = [s.defn.writer for s in sinks]  # type: ignore[union-attr]
-        if all(w.view(ch.old) == w.view(ch.new) for w in writers):
-            return False
-        written = [s for s in sinks if s.last_written is not NOTHING]
-        if not written:
-            return True
-        return any(not s.defn.writer.matches(ch.new, s.last_written) for s in written)  # type: ignore[union-attr]
+        # Per binding: manual if the part it drives changed, away from what it last wrote
+        # (or it hasn't written anything yet).
+        for s in sinks:
+            w = s.defn.writer  # type: ignore[union-attr]
+            if w.view(ch.old) == w.view(ch.new):
+                continue
+            if s.last_written is NOTHING or not w.matches(ch.new, s.last_written):
+                return True
+        return False
 
     def _handle_bus(self, event_type: str, data: dict[str, Any], t: float) -> None:
         self.now = max(self.now, t)
@@ -1024,7 +1038,3 @@ class Runtime:
             if s.key == key:
                 return s
         return None
-
-
-def entity_state_value(st: EntityState | None) -> str | None:
-    return st.state if st else None

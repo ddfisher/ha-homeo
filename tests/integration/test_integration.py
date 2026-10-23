@@ -243,3 +243,35 @@ async def test_boot_time_survives_entry_reload(hass: HomeAssistant, setup_homeo)
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     assert entry.runtime_data.host.boot_time == boot
+
+
+async def test_cross_file_conflict_blamed_on_edited_file(
+    hass: HomeAssistant, setup_homeo, rules_dir
+):
+    hass.states.async_set("fan.bathroom", "off")
+    hass.states.async_set("binary_sensor.window", "off")
+    entry = await setup_homeo(
+        {"a.homeo": "let unused = on\n", "b.homeo": "fan.bathroom := binary_sensor.window\n"}
+    )
+    manager = entry.runtime_data
+    (rules_dir / "a.homeo").write_text("fan.bathroom := on\n")  # now conflicts with b.homeo
+    await manager.async_reload()
+    assert set(manager.errors) == {"a.homeo"}
+    bound = [b.key for p in manager.programs.values() for b in p.bindings]
+    assert bound == ["fan.bathroom"]  # only b.homeo drives the fan
+    assert not manager.programs["a.homeo"].bindings  # a.homeo's previous version still runs
+
+
+async def test_old_version_that_now_conflicts_is_stopped(
+    hass: HomeAssistant, setup_homeo, rules_dir
+):
+    hass.states.async_set("fan.bathroom", "off")
+    entry = await setup_homeo({"a.homeo": "fan.bathroom := on\n", "b.homeo": "let x = on\n"})
+    manager = entry.runtime_data
+    (rules_dir / "a.homeo").write_text("fan.bathroom := on\nlet broken = nope\n")
+    await manager.async_reload()
+    assert "a.homeo" in manager.errors and manager.programs["a.homeo"].bindings
+    (rules_dir / "b.homeo").write_text("fan.bathroom := off\n")  # takes over the fan
+    await manager.async_reload()
+    bound = [(n, b.key) for n, p in manager.programs.items() for b in p.bindings]
+    assert bound == [("b.homeo", "fan.bathroom")]

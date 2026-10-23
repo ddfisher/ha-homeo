@@ -542,3 +542,36 @@ def test_full_design_example(host):
 def test_multiple_errors(host):
     ds = errs(host, "fan.bathroom := 5\nlight.hall := sensor.nope\nlet x = y\n")
     assert len(ds) == 3
+
+
+# ------------------------------------------------------------ review fixes (PR #1)
+
+
+def test_whole_entity_binding_may_read_other_attributes(host):
+    ok(host, 'climate.living := "heat" if climate.living.current_temperature < 18 else "off"')
+    ok(host, 'light.hall := light.hall.friendly_name == "Hall"')
+
+
+def test_whole_entity_binding_reading_its_read_back_attribute_is_a_self_read(host):
+    d = err(host, "light.hall := light.hall.brightness < 50%")
+    assert "reads `light.hall` itself" in d.message
+
+
+def test_on_off_domains_are_bools(host):
+    host.set_state("schedule.heating", "on", notify=False)
+    host.set_state("update.core", "off", notify=False)
+    host.set_state("acme.gadget", "on", notify=False)  # a custom integration's domain
+    ok(host, "switch.pump := schedule.heating or update.core or acme.gadget")
+
+
+def test_multi_state_domains_stay_strings_when_off(host):
+    host.set_state("media_player.tv", "off", notify=False)
+    ok(host, 'let x = media_player.tv == "playing"')
+
+
+def test_action_service_data_cant_target_bound_entity(host):
+    d = err(
+        host,
+        'light.porch := on\non input_button.doorbell:\n    light.turn_off(entity_id: "light.porch")\n',
+    )
+    assert "driven by a binding" in d.message

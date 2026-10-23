@@ -51,6 +51,12 @@ class Writer:
     literal_values: tuple[str, ...] | None = None  # allowed string results, if restricted
     on_params: dict[str, OnParam] = {}
 
+    @property
+    def read_attrs(self) -> frozenset[str | None]:
+        """What `matches` reads: attribute names, or None for the state itself. A rule that
+        reads one of these reads its own target."""
+        return frozenset({None})
+
     def calls(self, entity_id: str, value: Any) -> list[ServiceCall]:
         raise NotImplementedError
 
@@ -104,6 +110,10 @@ class OnOffWriter(Writer):
                 p = self.on_params[name]
                 data[p.service_key] = p.to_service(v)
         return [ServiceCall(self.domain, "turn_on", data, entity_id)]
+
+    @property
+    def read_attrs(self) -> frozenset[str | None]:
+        return frozenset({None, *(p.read_attr for p in self.on_params.values())})
 
     def matches(self, state: EntityState | None, value: Any) -> bool:
         if state is None:
@@ -217,6 +227,10 @@ class ServiceValueWriter(Writer):
 
     def calls(self, entity_id: str, value: Any) -> list[ServiceCall]:
         return [ServiceCall(self.domain, self.service, {self.key: self.convert(value)}, entity_id)]
+
+    @property
+    def read_attrs(self) -> frozenset[str | None]:
+        return frozenset({self.read_attr})
 
     def _actual(self, state: EntityState) -> Any:
         return state.attributes.get(self.read_attr) if self.read_attr else state.state

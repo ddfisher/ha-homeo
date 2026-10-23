@@ -860,3 +860,62 @@ def test_device_reconnecting_after_boot_is_not_a_change():
     r.h.set_state("binary_sensor.hall_motion", "off")  # integration reconnects
     r.h.advance(10 * MIN)
     assert r.new_calls() == []
+
+
+# ------------------------------------------------------------ review fixes (PR #1)
+
+
+def test_write_while_offline_catches_up_when_device_returns():
+    r = Rig("switch.pump := binary_sensor.bathroom_window")
+    r.h.simulate_devices = False
+    r.h.set_state("switch.pump", "unavailable")
+    r.h.set_state("binary_sensor.bathroom_window", "on")
+    assert r.new_calls() == ["switch.turn_on switch.pump"]  # sent, but the plug is offline
+    r.h.advance(60)
+    r.h.set_state("switch.pump", "off")  # back online, still off
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+
+
+def test_slow_cover_progress_is_not_manual():
+    r = Rig(
+        """
+cover.blinds.position :=
+    age(manual(cover.blinds)) < 1h -> keep
+    binary_sensor.bathroom_window  -> 30
+    else                           -> 100
+"""
+    )
+    r.h.simulate_devices = False
+    r.h.set_state("binary_sensor.bathroom_window", "on")
+    assert r.new_calls() == ["cover.set_cover_position cover.blinds position=30"]
+    r.h.advance(8)  # later reports arrive with a fresh context
+    r.h.set_state("cover.blinds", "closing", {"current_position": 60})
+    r.h.advance(8)
+    r.h.set_state("cover.blinds", "open", {"current_position": 30})
+    assert r.rt.cells["manual:cover.blinds"].extra["t"].hi == float("-inf")
+    r.h.set_state("binary_sensor.bathroom_window", "off")
+    assert r.new_calls() == ["cover.set_cover_position cover.blinds position=100"]
+
+
+def test_manual_change_detected_per_binding():
+    r = Rig(
+        """
+let m = age(manual(climate.living)) < 1h
+climate.living := "off" if m else "heat"
+climate.living.temperature := 20
+"""
+    )
+    r.h.set_state("climate.living", "off", merge=True)  # mode binding writes "heat" back...
+    r.h.advance(2 * H)
+    r.new_calls()
+    t = r.rt.cells["manual:climate.living"].extra["t"]
+    r.h.set_state("climate.living", "heat", {"temperature": 23}, merge=True)  # setpoint by hand
+    assert r.rt.cells["manual:climate.living"].extra["t"] != t
+
+
+def test_today_has_a_value():
+    r = Rig("switch.pump := age(today) < 1h")  # the first hour of each day
+    r.h.advance_to(r.h.local(2026, 1, 6, 0, 0))
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+    r.h.advance_to(r.h.local(2026, 1, 6, 1, 0))
+    assert r.new_calls() == ["switch.turn_off switch.pump"]

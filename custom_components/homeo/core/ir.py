@@ -36,6 +36,11 @@ class Now(Node):
 
 
 @dataclass(eq=False, slots=True)
+class Today(Node):
+    """The current local weekday (`today`)."""
+
+
+@dataclass(eq=False, slots=True)
 class Read(Node):
     """The current value of a cell."""
 
@@ -275,6 +280,15 @@ class ServiceCallIR:
     span: Span
     text: str
 
+    def targets(self) -> list[str]:
+        """Entities this call acts on: `entity.service()`, plus constant `entity_id` data
+        (a string, possibly comma-separated, as HA accepts)."""
+        out = [self.entity_id] if self.entity_id else []
+        for key, node in self.data:
+            if key == "entity_id" and isinstance(node, Const) and isinstance(node.value, str):
+                out += [e.strip() for e in node.value.split(",") if e.strip()]
+        return out
+
 
 @dataclass(eq=False, slots=True)
 class BindingDef:
@@ -393,6 +407,6 @@ def arm_cells(a: ArmIR | GroupIR) -> list[CellDef]:
 
 def uses_now(n: Node) -> bool:
     """Whether evaluating `n` depends on the clock (so it needs wake-ups)."""
-    if isinstance(n, (Now, InTimeRange, DayIn, Age, Fresh)):
+    if isinstance(n, (Now, Today, InTimeRange, DayIn, Age, Fresh)):
         return True
     return any(uses_now(c) for c in children(n))

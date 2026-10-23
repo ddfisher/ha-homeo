@@ -14,11 +14,11 @@ from typing import Any
 
 from . import ast as A
 from . import ir
-from .errors import CompileError, DiagnosticSink, Span, did_you_mean
+from .errors import DiagnosticSink, Span, did_you_mean
 from .host import EntityCatalog, EntityState
 from .printer import fmt_duration, to_source
 from .types import NUMERIC, T, article, assignable, join
-from .values import DAY_NAMES, KEEP, UNKNOWN, DailyTime, Days, Num
+from .values import DAY_NAMES, KEEP, UNKNOWN, DailyTime, Days, Num, parse_timestamp
 from .writers import WHOLE_ONLY, WRITERS, Writer
 
 KNOWN_DOMAINS = frozenset(
@@ -26,13 +26,17 @@ KNOWN_DOMAINS = frozenset(
     alarm_control_panel assist_satellite automation binary_sensor button calendar camera climate
     conversation counter cover date datetime device_tracker event fan group humidifier image
     input_boolean input_button input_datetime input_number input_select input_text lawn_mower
-    light lock media_player notify number person remote scene script select sensor siren stt sun
-    switch text time timer todo tts update vacuum valve wake_word water_heater weather zone
+    light lock media_player notify number person remote scene schedule script select sensor siren
+    stt sun switch text time timer todo tts update vacuum valve wake_word water_heater weather
+    zone
     """.split()
 )
 
 BOOL_DOMAINS = frozenset(
-    "binary_sensor input_boolean switch light fan siren automation remote script".split()
+    """
+    automation binary_sensor calendar fan humidifier input_boolean light remote schedule script
+    siren switch update
+    """.split()
 )
 TIMESTAMP_DOMAINS = frozenset("event input_button button scene".split())
 NUMBER_DOMAINS = frozenset("input_number number counter".split())
@@ -63,11 +67,6 @@ BUILTIN_NAMES = ("now", "today", *SOLAR, *DAY_CONSTS)
 MIDNIGHT = DailyTime(0)
 
 
-@dataclass(eq=False, slots=True)
-class Today(ir.Node):
-    pass
-
-
 @dataclass
 class Globals:
     """What other loaded files define, for cross-file rules."""
@@ -88,14 +87,28 @@ class Globals:
             {k: r for k, r in self.binding_reads.items() if self.targets.get(k) != file},
         )
 
+    def conflicts(self, program: ir.Program) -> list[str]:
+        """What a (previously compiled) program defines that is already defined here."""
+        out = [
+            f"`{b.key}` is bound in {self.targets[b.key]}"
+            for b in program.bindings
+            if b.key in self.targets
+        ]
+        out += [
+            f"state machine `{m.name}` is defined in {self.machines[m.name]}"
+            for m in program.machines
+            if m.name in self.machines
+        ]
+        return out
+
     def add(self, program: ir.Program, reads: dict[str, set[tuple[str, str | None]]]) -> None:
         for b in program.bindings:
             self.targets[b.key] = program.file
             self.bound_entities[b.entity_id] = program.file
         for a in program.actions:
             for c in a.calls:
-                if c.entity_id:
-                    self.action_entities[c.entity_id] = program.file
+                for eid in c.targets():
+                    self.action_entities[eid] = program.file
         for m in program.machines:
             self.machines[m.name] = program.file
         self.binding_reads.update(reads)
@@ -107,16 +120,6 @@ class _Ctx:
     where: str = "expression"  # "binding", "let", "state", "action"
 
 
-def parse_timestamp(s: str) -> float | None:
-    try:
-        dt = datetime.fromisoformat(s)
-    except (TypeError, ValueError):
-        return None
-    if dt.tzinfo is None:
-        return None
-    return dt.timestamp()
-
-
 def infer_entity_type(entity_id: str, state: EntityState | None) -> T:
     """I14."""
     domain = entity_id.split(".", 1)[0]
@@ -126,7 +129,14 @@ def infer_entity_type(entity_id: str, state: EntityState | None) -> T:
         return T.TIMESTAMP
     if domain in NUMBER_DOMAINS:
         return T.NUMBER
-    if domain == "group" and state is not None and state.state in ("on", "off"):
+    if (
+        (domain == "group" or domain not in KNOWN_DOMAINS)
+        and state is not None
+        and state.state in ("on", "off")
+    ):
+        # groups of on/off entities, and on/off entities of domains we don't know (custom
+        # integrations). Known multi-state domains (media_player, climate, ...) can also be
+        # "off", so they stay strings.
         return T.BOOL
     if domain == "sensor" and state is not None:
         attrs = state.attributes
@@ -206,7 +216,7 @@ class Checker:
             try:
                 match stmt:
                     case A.Let():
-                        self.let_value(stmt.name, stmt.name_span)
+                        self.let_value(stmt.name)
                     case A.Bind():
                         self.check_bind(stmt)
                     case A.StateDecl():
@@ -299,7 +309,7 @@ class Checker:
         self.program.cells[cell.key] = cell
         return cell
 
-    def let_value(self, name: str, span: Span) -> ir.Node:
+    def let_value(self, name: str) -> ir.Node:
         if name in self.let_values:
             return self.let_values[name]
         if name in self.resolving:
@@ -314,7 +324,6 @@ class Checker:
         finally:
             self.resolving.pop()
         self.let_values[name] = node
-        del span
         return node
 
     # ---------------------------------------------------------------- entities
@@ -395,7 +404,7 @@ class Checker:
         head, segs = flat
         name = head.id
         if name in self.lets:
-            node = self.let_value(name, head.span)
+            node = self.let_value(name)
             return self.apply_segments(node, segs, name, e.span)
         if name in self.machines:
             if segs:
@@ -441,7 +450,7 @@ class Checker:
         if name == "now":
             return ir.Now(T.TIMESTAMP, span, "now", True)
         if name == "today":
-            return Today(T.DAY, span, "today")
+            return ir.Today(T.DAY, span, "today")
         if name in SOLAR:
             return ir.Const(T.TIMEOFDAY, span, name, False, DailyTime(solar=name))
         return ir.Const(T.DAY, span, name, False, Days(DAY_CONSTS[name]))
@@ -704,8 +713,8 @@ class Checker:
                 span,
                 f"use a range: `now in {b.text}..…`",
             )
-        if isinstance(a, Today) or isinstance(b, Today):
-            other = b if isinstance(a, Today) else a
+        if isinstance(a, ir.Today) or isinstance(b, ir.Today):
+            other = b if isinstance(a, ir.Today) else a
             if op not in ("==", "!=") or not isinstance(other, ir.Const) or other.type != T.DAY:
                 self.fail("`today` can only be compared with days, e.g. `today == sat`", span)
             return ir.DayIn(T.BOOL, span, text, False, other.value, op == "!=")
@@ -802,7 +811,7 @@ class Checker:
                     if not (isinstance(b, ir.Const) and b.type == T.TIMEOFDAY):
                         self.fail("a time range needs times of day, e.g. `22:00..06:00`", b.span)
                 return ir.InTimeRange(T.BOOL, span, text, False, lo.value, hi.value, negate)
-            if isinstance(x, Today):
+            if isinstance(x, ir.Today):
                 for b in (lo, hi):
                     if not (isinstance(b, ir.Const) and b.type == T.DAY and len(b.value.days) == 1):
                         self.fail("a day range needs single days, e.g. `mon..fri`", b.span)
@@ -815,7 +824,7 @@ class Checker:
                 span,
                 "e.g. `now in 22:00..06:00` or `today in mon..fri`",
             )
-        if isinstance(x, Today):
+        if isinstance(x, ir.Today):
             rhs = [r] if not isinstance(r, A.ListExpr) else r.items
             days: set[int] = set()
             for item in rhs:
@@ -1049,7 +1058,7 @@ class Checker:
             kind = "`let` name" if head.id in self.lets else "state machine"
             hint = None
             if head.id in self.lets:
-                v = self.let_value(head.id, head.span)
+                v = self.let_value(head.id)
                 if isinstance(v, ir.Read) and isinstance(v.cell, ir.EntityCell):
                     hint = f"write the full entity id: `{v.cell.text} := …`"
             self.fail(
@@ -1123,7 +1132,7 @@ class Checker:
         reads = self.reads(value)
         self.binding_reads[key] = reads
         for eid, a in reads:
-            if self.affects(entity_id, attr, writer, eid, a):
+            if self.affects(entity_id, writer, eid, a):
                 self.fail(
                     f"the rule for `{key}` reads `{key}` itself",
                     stmt.value.span,
@@ -1212,14 +1221,9 @@ class Checker:
                 )
 
     @staticmethod
-    def affects(
-        entity_id: str, attr: str | None, writer: Writer, read_eid: str, read_attr: str | None
-    ) -> bool:
-        if read_eid != entity_id:
-            return False
-        if attr is None:
-            return True
-        return read_attr == getattr(writer, "read_attr", attr)
+    def affects(entity_id: str, writer: Writer, read_eid: str, read_attr: str | None) -> bool:
+        """Whether reading (read_eid, read_attr) reads the target this writer drives."""
+        return read_eid == entity_id and read_attr in writer.read_attrs
 
     def reads(self, n: ir.Node) -> set[tuple[str, str | None]]:
         """Entity reads a value depends on (through cells, not through machines or manual())."""
@@ -1248,19 +1252,19 @@ class Checker:
     def check_binding_cycles(self) -> None:
         all_reads = dict(self.globals.binding_reads)
         all_reads.update(self.binding_reads)
-        targets: dict[str, tuple[str, str | None, Writer]] = {}
+        targets: dict[str, tuple[str, Writer | None]] = {}
         for k in all_reads:
             if k in self.globals.targets or any(b.key == k for b in self.program.bindings):
                 parts = k.split(".")
                 eid = ".".join(parts[:2])
                 attr = parts[2] if len(parts) > 2 else None
-                targets[k] = (eid, attr, WRITERS.get((parts[0], attr)))
+                targets[k] = (eid, WRITERS.get((parts[0], attr)))
 
         def edges(k: str) -> list[str]:
             out = []
             for eid, a in all_reads.get(k, ()):
-                for t, (teid, tattr, w) in targets.items():
-                    if w is not None and self.affects(teid, tattr, w, eid, a):
+                for t, (teid, w) in targets.items():
+                    if w is not None and self.affects(teid, w, eid, a):
                         out.append(t)
             return out
 
@@ -1294,46 +1298,30 @@ class Checker:
         arms: list[ir.ArmIR | ir.GroupIR] = []
         for a in stmt.arms:
             try:
-                arms.append(self.machine_arm(a, ctx, cell))
+                arm = self.arm(a, ctx, latest=False)
+                self.check_machine_results(arm, cell)
+                arms.append(arm)
             except _Fail:
                 pass
         cell.arms = arms
         self.program.machines.append(cell)
 
-    def machine_arm(
-        self, a: A.Arm | A.Group, ctx: _Ctx, cell: ir.MachineCell
-    ) -> ir.ArmIR | ir.GroupIR:
-        if isinstance(a, A.Group):
-            guard = self.want_bool(self.resolve(a.guard, ctx), "an arm")
-            subs = []
-            for s in a.arms:
-                try:
-                    subs.append(self.machine_arm(s, ctx, cell))
-                except _Fail:
-                    pass
-            return ir.GroupIR(guard, subs, a.span, guard.text)
-        cond = None if a.cond is None else self.want_bool(self.resolve(a.cond, ctx), "an arm")
-        r = a.result
-        if isinstance(r, A.StringLit):
-            result: ir.Node = ir.Const(T.STRING, r.span, to_source(r), False, r.value)
-        elif (
-            isinstance(r, A.Call)
-            and isinstance(r.func, A.Name)
-            and r.func.id == "previous"
-            and len(r.args) == 1
-            and isinstance(r.args[0], A.Name)
-            and r.args[0].id == cell.name
-        ):
-            result = ir.Previous(T.STRING, r.span, f"previous({cell.name})", False, cell)
-        else:
-            self.fail(
-                "a state machine's results must be state names (strings) or "
-                f"`previous({cell.name})`",
-                r.span,
-                'e.g. `-> "boost"`',
-            )
-        text = f"{'else' if cond is None else cond.text} -> {result.text}"
-        return ir.ArmIR(cond, result, a.span, text)
+    def check_machine_results(self, arm: ir.ArmIR | ir.GroupIR, cell: ir.MachineCell) -> None:
+        """Results are state names or `previous(self)`, so the states are known (I8)."""
+        if isinstance(arm, ir.GroupIR):
+            for sub in arm.arms:
+                self.check_machine_results(sub, cell)
+            return
+        r = arm.result
+        if isinstance(r, ir.Const) and r.type == T.STRING and r.value in cell.states:
+            return
+        if isinstance(r, ir.Previous) and r.cell is cell:
+            return
+        self.fail(
+            f"a state machine's results must be state names (strings) or `previous({cell.name})`",
+            r.span,
+            'e.g. `-> "boost"`',
+        )
 
     # ----------------------------------------------------------------- actions
 
@@ -1362,7 +1350,7 @@ class Checker:
             self.fail('service data is named, e.g. `message: "…"`', c.args[0].span)
         entity_id: str | None = None
         if head.id in self.lets:
-            node = self.let_value(head.id, head.span)
+            node = self.let_value(head.id)
             if (
                 not (
                     isinstance(node, ir.Read)
@@ -1405,10 +1393,12 @@ class Checker:
             bound[b.entity_id] = self.file.name
         for a in self.program.actions:
             for c in a.calls:
-                if c.entity_id and c.entity_id in bound:
-                    where = bound[c.entity_id]
+                for eid in c.targets():
+                    if eid not in bound:
+                        continue
+                    where = bound[eid]
                     self.error(
-                        f"`{c.entity_id}` is driven by a binding"
+                        f"`{eid}` is driven by a binding"
                         + (f" in {where}" if where != self.file.name else "")
                         + ", so actions can't call services on it",
                         c.span,
@@ -1443,10 +1433,7 @@ def compile_source(
 ) -> tuple[ir.Program, dict[str, set[tuple[str, str | None]]]]:
     from .parser import parse
 
-    try:
-        return check(parse(source, file), catalog, globals_)
-    except CompileError:
-        raise
+    return check(parse(source, file), catalog, globals_)
 
 
 __all__ = ["check", "compile_source", "Globals", "Checker", "fmt_duration"]

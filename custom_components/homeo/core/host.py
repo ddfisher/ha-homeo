@@ -11,6 +11,8 @@ from typing import Any, Protocol
 Unsub = Callable[[], None]
 
 UNAVAILABLE_STATES = frozenset({"unavailable", "unknown"})
+# States of a device still on its way to a target (covers, valves, locks).
+TRANSITIONAL_STATES = frozenset({"opening", "closing", "locking", "unlocking"})
 
 
 @dataclass(frozen=True, slots=True)

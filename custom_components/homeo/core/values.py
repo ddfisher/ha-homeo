@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime
 
 INF = math.inf
 
@@ -221,6 +222,17 @@ class Days:
 
     def __repr__(self) -> str:
         return "{" + ",".join(DAY_NAMES[d] for d in sorted(self.days)) + "}"
+
+
+def parse_timestamp(s: str) -> float | None:
+    """UTC epoch seconds of an ISO 8601 timestamp with a time zone (HA's format), else None."""
+    try:
+        dt = datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.timestamp()
 
 
 def kleene_not(a):
