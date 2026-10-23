@@ -3,6 +3,7 @@
 import asyncio
 from datetime import timedelta
 
+import pytest
 from homeassistant.core import Context, HomeAssistant, State
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
@@ -275,3 +276,17 @@ async def test_old_version_that_now_conflicts_is_stopped(
     await manager.async_reload()
     bound = [(n, b.key) for n, p in manager.programs.items() for b in p.bindings]
     assert bound == [("b.homeo", "fan.bathroom")]
+
+
+@pytest.mark.parametrize("expected_lingering_timers", [True])  # HA's sun integration polls
+async def test_solar_times_match_the_sun_entity(hass: HomeAssistant, setup_homeo):
+    from homeassistant.setup import async_setup_component
+
+    assert await async_setup_component(hass, "sun", {})
+    await hass.async_block_till_done()
+    hass.states.async_set("input_boolean.dark", "off")
+    async_mock_service(hass, "input_boolean", "turn_on")
+    async_mock_service(hass, "input_boolean", "turn_off")
+    entry = await setup_homeo({"sun.homeo": "input_boolean.dark := now in sunset..sunrise\n"})
+    dark = entry.runtime_data.runtime.binding("input_boolean.dark").last_known
+    assert dark == (hass.states.get("sun.sun").state == "below_horizon")

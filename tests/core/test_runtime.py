@@ -269,7 +269,7 @@ def test_age_wakes_at_exact_instant():
     assert r.new_calls() == ["light.turn_on light.porch"]
     r.h.advance(20)
     r.h.set_state("binary_sensor.hall_motion", "off")
-    assert r.h.pending_timers() == [r.h.t + 300]
+    assert r.h.t + 300 in r.h.pending_timers()  # a wake-up at the exact instant, no polling
     r.h.advance(299)
     assert r.new_calls() == []
     r.h.advance(1)
@@ -919,3 +919,57 @@ def test_today_has_a_value():
     assert r.new_calls() == ["switch.turn_on switch.pump"]
     r.h.advance_to(r.h.local(2026, 1, 6, 1, 0))
     assert r.new_calls() == ["switch.turn_off switch.pump"]
+
+
+# --------------------------------------------------------------- sun.sun (I5)
+
+
+def test_night_range_follows_sun_entity():
+    r = Rig("switch.pump := now in sunset..sunrise")  # fake sun: sunrise 07:00, sunset 19:00
+    r.h.advance_to(r.h.local(2026, 1, 5, 18, 59))
+    assert r.new_calls() == []
+    r.h.advance_to(r.h.local(2026, 1, 5, 19, 0))
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+    r.h.advance_to(r.h.local(2026, 1, 6, 7, 0))
+    assert r.new_calls() == ["switch.turn_off switch.pump"]
+
+
+def test_positive_offset_after_sun_entity_moved_on():
+    # sun.sun shows tomorrow's sunset from 19:00, but sunset + 30min is still due today
+    r = Rig('on sunset + 30min:\n    notify.mobile_app_phone(message: "x")\n')
+    r.h.advance_to(r.h.local(2026, 1, 5, 19, 29))
+    assert r.new_calls() == []
+    r.h.advance_to(r.h.local(2026, 1, 5, 19, 30))
+    assert r.new_calls() == ["notify.mobile_app_phone message=x"]
+
+
+def test_sun_unavailable_is_unknown():
+    r = Rig("switch.pump := now in sunset..sunrise")
+    r.h.stop_sun()
+    r.h.advance_to(r.h.local(2026, 1, 5, 20, 0))
+    assert r.new_calls() == []  # unknown: the pump is left alone
+    r.h.start_sun()
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+
+
+def test_elevation_updates_dont_count_as_changes():
+    r = Rig("switch.pump := now in sunset..sunrise")
+    sun = r.rt.cells["sun"]
+    before = (sun.value, sun.ct)
+    r.h.advance(60)
+    r.h.set_state("sun.sun", r.state("sun.sun"), {"elevation": 12.5}, merge=True)
+    assert (sun.value, sun.ct) == before
+
+
+def test_restart_estimates_missed_sunset():
+    rules = """
+state house = "day":
+    house == "day" and fresh(sunset) -> "evening"
+on sunset:
+    notify.mobile_app_phone(message: "sunset")
+"""
+    r = Rig(rules)
+    r.h.advance_to(r.h.local(2026, 1, 5, 18, 0))
+    r.restart(downtime=2 * H)  # down over sunset (19:00)
+    assert r.machine("house") == "evening"  # the missed sunset is still fresh (D17 rule 5)
+    assert r.new_calls() == []  # actions don't catch up (D17 rule 4)

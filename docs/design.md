@@ -173,7 +173,7 @@ rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts ar
 | I2 | Glitch-free evaluation | Waves in topological order; machines are sources and settle (chains) before bindings and actions run |
 | I3 | Ranges | `now in A..B` is true when `A` occurred more recently than `B` (start inclusive, end exclusive) |
 | I4 | DST | Non-existent wall times resolve to the first instant after the gap; ambiguous ones to the first occurrence |
-| I5 | `sunset` with `sun.sun` unavailable | Solar times are computed from HA's location (astral), not read from `sun.sun` |
+| I5 | `sunset` with `sun.sun` unavailable | Solar times come from `sun.sun` (D4). It only shows *next* occurrences, so homeo remembers each one as it passes; right after a start, the previous one is estimated as next − 24 h. `sun.sun` missing: compile error; unavailable: `unknown` |
 | I6 | `every D` | Aligned to local midnight (`every 15min` ticks at :00/:15/…) |
 | I7 | `count(x, D)` | Exact event timestamps, window `(now − D, now]` |
 | I8 | Machine states | Results must be string literals or `previous(self)`, so the state set is closed |

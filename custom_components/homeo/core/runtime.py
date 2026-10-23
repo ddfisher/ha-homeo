@@ -25,6 +25,7 @@ from .host import (
     ServiceCall,
     StateChange,
 )
+from .sun import SunTracker
 from .timeutil import (
     every_last_tick,
     in_range,
@@ -127,6 +128,7 @@ class Runtime:
     def __init__(self, host: Host):
         self.host = host
         self.programs: dict[str, ir.Program] = {}
+        self.sun = SunTracker(host.tz)  # kept across reloads: it remembers past solar events
         self.cells: dict[str, RCell] = {}
         self.sinks: list[RSink] = []
         self.machines: dict[str, RCell] = {}
@@ -385,9 +387,14 @@ class Runtime:
                     last, nxt = every_last_tick(d.period, self.now, self.host.tz)
                     self._wake_at(nxt)
                     return Num.of(last)
+                case ir.SunCell():
+                    self.sun.update(self.host.get_state(d.entity_id), self.now)
+                    return self.sun.snapshot() if self.sun.available else UNKNOWN
                 case ir.TimePointCell():
-                    last = last_occurrence(d.daily, self.now, self.host.tz, self.host.solar)
-                    nxt = next_occurrence(d.daily, self.now, self.host.tz, self.host.solar)
+                    if d.daily.solar is not None and not self.sun.available:
+                        return UNKNOWN
+                    last = last_occurrence(d.daily, self.now, self.host.tz, self.sun.occurrence)
+                    nxt = next_occurrence(d.daily, self.now, self.host.tz, self.sun.occurrence)
                     if nxt is not None:
                         self._wake_at(nxt)
                     return Num.of(last) if last is not None else NEVER
@@ -566,8 +573,10 @@ class Runtime:
                 for it in items:
                     result = kleene_or(result, self._compare("==", v, self._eval(it)))
                 return kleene_not(result) if neg else result
-            case ir.InTimeRange(start=s, end=e, negate=neg):
-                inside, wake = in_range(s, e, self.now, self.host.tz, self.host.solar)
+            case ir.InTimeRange(start=s, end=e, negate=neg, sun=sun):
+                if sun is not None and not self.sun.available:
+                    return UNKNOWN
+                inside, wake = in_range(s, e, self.now, self.host.tz, self.sun.occurrence)
                 self._wake_at(wake)
                 return (not inside) if neg else inside
             case ir.DayIn(days=days, negate=neg):

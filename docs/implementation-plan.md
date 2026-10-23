@@ -64,7 +64,6 @@ class Host(Protocol):
     def subscribe_bus(self, event_type, cb) -> Unsub        # cb(event_data: dict, time)
     def schedule(self, when: float, cb) -> Unsub
     def call_service(self, call: ServiceCall) -> None       # host creates + remembers the Context
-    def solar(self, event: str, day: date) -> float | None  # sunrise/sunset/dawn/dusk for a local date
     def publish_machine(self, name, value, changed_at, options) -> None  # the select entity
     def restore_machine(self, name) -> tuple[str, float] | None          # (value, change time)
     def log(self, level, message) -> None
@@ -179,9 +178,17 @@ one write.
   doesn't exist that day (spring forward) resolves to the first instant after the gap; an
   ambiguous one (fall back) resolves to its first occurrence. So a daily time point fires
   exactly once per local day.
-- **I5. Solar times** come from HA's location via `homeassistant.helpers.sun` (astral), not from
-  the `sun.sun` entity, so they're always available. A day without that event (polar
-  regions) has no occurrence that day. A time point uses the most recent day that has one.
+- **I5. Solar times** come from the `sun.sun` entity, as D4 says (owner decision; the Sun
+  integration is set up by default). `sun.sun` only shows each event's *next* occurrence
+  (`next_rising`, `next_setting`, `next_dawn`, `next_dusk`) and moves it forward when the event
+  passes, but rules also need the most recent one (`fresh(sunset)`, `on sunset + 30min:` after
+  sunset, ranges). So `core/sun.py` remembers each occurrence as `sun.sun` moves past it. Until
+  it has seen one (right after homeo starts), the previous occurrence is estimated as the next
+  one minus 24 h: off by a few minutes at mid latitudes (D17: predictable beats exact), and
+  wrong in polar day/night. Rules depend on a `sun` cell whose value changes only when solar
+  times change, not on `sun.sun`'s frequent elevation updates. If `sun.sun` doesn't exist,
+  rules using solar times don't compile (with a hint to enable the Sun integration); while
+  it's unavailable, solar times are `unknown`.
 - **I6. `every D`** is aligned to the clock in local time: ticks at multiples of `D` since local
   midnight (`every 15min` → :00, :15, :30, :45), so it's predictable and survives reloads and
   restarts. `D` must divide 24 h; otherwise ticks count from the Unix epoch, and the checker warns.
@@ -346,7 +353,8 @@ calling services. Bindings still update `last_known_result` as if they had writt
 - `FakeHost`: in-memory entity states, a simulated clock (`advance(seconds)` runs due timers in
   order and moves `now` to each timer's time), recorded service calls, a `set_state(...)` that
   mimics HA (keeps `last_changed` when the state string is unchanged; `ours` flag for writes
-  echoed back), a fixed time zone and stub solar times.
+  echoed back), a fixed time zone, and a `sun.sun` entity that behaves like HA's (next
+  occurrences, recomputed as each event passes).
 - Lexer: token kinds, positions, durations/percent/time literals, indentation, tabs, strings and
   escapes, errors.
 - Parser: AST for every snippet in the design (§5–§21), precedence table (§20) one case per row,
@@ -418,7 +426,7 @@ M5 as built:
 
 ### What has been verified, and what hasn't
 
-- 273 tests: 259 core (FakeHost, simulated clock), 14 integration
+- 280 tests: 265 core (FakeHost, simulated clock), 15 integration
   (`pytest-homeassistant-custom-component`). They pass on HA 2026.10.2 / Python 3.14 (the CI
   setup) and on HA 2026.2.3 / Python 3.13 (the minimum in `hacs.json`). The full suite passed
   100 consecutive runs after the watcher's shutdown races were fixed.
@@ -427,6 +435,9 @@ M5 as built:
 
 ### Known limitations and open questions
 
+- Solar times (I5): right after homeo starts, the previous sunrise/sunset is estimated as the
+  next one minus 24 h until `sun.sun` moves past one. That's a few minutes off at mid latitudes
+  and wrong in polar day/night.
 - A failed service call isn't retried, except that a device returning from `unavailable`
   gets its state compared with the rule again (§2.5).
 - Lists aren't allowed in service data (`entity_id: ["a", "b"]`); only after `in`. Use a

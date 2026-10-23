@@ -17,6 +17,7 @@ from . import ir
 from .errors import DiagnosticSink, Span, did_you_mean
 from .host import EntityCatalog, EntityState
 from .printer import fmt_duration, to_source
+from .sun import SUN_ENTITY
 from .types import NUMERIC, T, article, assignable, join
 from .values import DAY_NAMES, KEEP, UNKNOWN, DailyTime, Days, Num, parse_timestamp
 from .writers import WHOLE_ONLY, WRITERS, Writer
@@ -384,6 +385,19 @@ class Checker:
         )
         return ir.Read(t, span, text, False, cell)
 
+    def sun_cell(self, span: Span, *times: DailyTime) -> ir.CellDef | None:
+        """The `sun.sun` cell, if any of `times` is solar (D4: solar times come from it)."""
+        solar = [t.solar for t in times if t.solar is not None]
+        if not solar:
+            return None
+        if not self.catalog.entity_exists(SUN_ENTITY):
+            self.fail(
+                f"`{solar[0]}` needs the `{SUN_ENTITY}` entity, which doesn't exist",
+                span,
+                "enable the Sun integration (Settings → Devices & services)",
+            )
+        return self.cell(ir.SunCell("sun", T.ANY, SUN_ENTITY, span, entity_id=SUN_ENTITY))
+
     # ------------------------------------------------------------------- paths
 
     @staticmethod
@@ -630,7 +644,14 @@ class Checker:
         n = self.resolve(e, ctx)
         if isinstance(n, ir.Const) and n.type == T.TIMEOFDAY:
             return self.cell(
-                ir.TimePointCell(f"timepoint:{n.text}", T.TIMESTAMP, n.text, n.span, daily=n.value)
+                ir.TimePointCell(
+                    f"timepoint:{n.text}",
+                    T.TIMESTAMP,
+                    n.text,
+                    n.span,
+                    daily=n.value,
+                    sun=self.sun_cell(n.span, n.value),
+                )
             )
         if n.type not in (T.BOOL, T.TIMESTAMP, T.ANY):
             self.fail(
@@ -705,9 +726,13 @@ class Checker:
             if not isinstance(b, ir.Const):
                 self.fail("compare `now` with a fixed time of day", span)
             if op in (">", ">="):
-                return ir.InTimeRange(T.BOOL, span, text, False, b.value, MIDNIGHT)
+                return ir.InTimeRange(
+                    T.BOOL, span, text, False, b.value, MIDNIGHT, sun=self.sun_cell(span, b.value)
+                )
             if op in ("<", "<="):
-                return ir.InTimeRange(T.BOOL, span, text, False, MIDNIGHT, b.value)
+                return ir.InTimeRange(
+                    T.BOOL, span, text, False, MIDNIGHT, b.value, sun=self.sun_cell(span, b.value)
+                )
             self.fail(
                 f"`now {op} {b.text}` is never exactly true",
                 span,
@@ -810,7 +835,10 @@ class Checker:
                 for b in (lo, hi):
                     if not (isinstance(b, ir.Const) and b.type == T.TIMEOFDAY):
                         self.fail("a time range needs times of day, e.g. `22:00..06:00`", b.span)
-                return ir.InTimeRange(T.BOOL, span, text, False, lo.value, hi.value, negate)
+                sun = self.sun_cell(span, lo.value, hi.value)
+                return ir.InTimeRange(
+                    T.BOOL, span, text, False, lo.value, hi.value, negate, sun=sun
+                )
             if isinstance(x, ir.Today):
                 for b in (lo, hi):
                     if not (isinstance(b, ir.Const) and b.type == T.DAY and len(b.value.days) == 1):

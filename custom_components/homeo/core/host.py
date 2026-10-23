@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, tzinfo
+from datetime import tzinfo
 from typing import Any, Protocol
 
 Unsub = Callable[[], None]
@@ -84,10 +84,6 @@ class Host(EntityCatalog, Protocol):
     def schedule(self, when: float, callback: Callable[[float], None]) -> Unsub: ...
 
     def call_service(self, call: ServiceCall) -> None: ...
-
-    def solar(self, event: str, day: date) -> float | None:
-        """UTC epoch seconds of `event` (sunrise, sunset, dawn, dusk) on a local date."""
-        ...
 
     def publish_machine(self, name: str, value: str, changed_at: float, options: list[str]) -> None:
         """Update (or create) the machine's `select` entity."""
