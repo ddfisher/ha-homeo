@@ -115,16 +115,17 @@ messages. We can ship a VS Code / TextMate grammar later.
 - **`let name = expr`** names anything. An alias is just the simplest case:
   ```python
   let co2     = sensor.bathroom_co2                 # alias
-  let exhaust = fan.bathroom_exhaust                # alias for something we'll drive
   let stuffy  = co2 > 800 or humidity > 70%         # computed value
   ```
-- **`:=` is the only way to drive a device:** `exhaust := stuffy`. Its left side must be an entity
-  or attribute, written out or through a `let` that is a plain entity reference. `:=` on a
-  computed `let` is a compile error.
+- **`:=` is the only way to drive a device,** and its left side is always a **full entity id or
+  attribute**: `fan.bathroom_exhaust := stuffy`. A `let` name on the left of `:=` is a compile
+  error, even if it's a plain alias. So every driven device is greppable by its real id. (This
+  may be relaxed later if it proves tedious.)
 - **Every line that changes a device is visibly marked by `:=`.** Plain `=` only appears in `let`
   and `state` declarations.
-- **Proposed:** `let` and `state` names share one namespace across all rule files, so a `house`
-  mode defined in one file can be used in another. Duplicate names are compile errors.
+- **Each file has its own namespace** for `let` and `state` names. To use another file's state
+  machine, read its entity (`select.ha_dsl_house`, D13d). State machine names must still be
+  unique across files, because their entity ids would collide.
 - **Open idea (v2):** area-scoped blocks (`in area bathroom: fan := co2 > 800`), resolved through
   HA's area registry.
 
@@ -594,7 +595,7 @@ Both are meaningful, and they differ:
 | `on person.ann == "home" if night:` | Ann **arrives** while it's night. A daytime arrival is marked handled without running, so nightfall later doesn't trigger it. In FRP terms, this filters the arrival events. |
 | `on person.ann == "home" and night:` | "Ann home and it's night" **becomes true**: she arrives at night, *or* night falls while she's home. |
 
-### D22. Declarative notifications (Open, v1 or v2)
+### D22. Declarative notifications (Decided: not in v1)
 
 Many actions are really notifications, and notifications can be state. The HA mobile app
 supports a `tag` (a newer notification replaces the old one) and `clear_notification`. So a
@@ -611,8 +612,8 @@ back to `none` (here, when the washer leaves `done`). Restarts are handled by th
 other bindings (§17). It doesn't cover true one-offs (a ding per
 doorbell press, TTS, `flash()`), so `on` would remain for those.
 
-**Decided:** `on x [if g]:` is the single effect construct. Whether to *also* add declarative
-notification targets, and in which version, is still open (D22).
+**Decided:** `on x [if g]:` is the single effect construct. Declarative notification targets are
+not in v1; they're a candidate for a later version.
 
 ### Other details (Decided)
 
@@ -710,7 +711,7 @@ Known limits:
 
 ---
 
-## 17. Startup and restarts: D17 (Proposed, revised)
+## 17. Startup and restarts: D17 (Decided)
 
 Restarts are rare, so v1 aims for **simple, predictable** behaviour, not exact catch-up.
 **Principle: after a restart, devices are brought in line with their rules, but only once a
@@ -756,7 +757,7 @@ rule's result is definite.**
      disagrees, since `manual()` history isn't kept. Restarts are rare enough for this to be
      fine in v1.
 4. **Actions treat everything before the restart as handled.** No catch-up.
-   - **Rule reloads are not restarts (Proposed).** Reloads happen on every save, so they must not
+   - **Rule reloads are not restarts.** Reloads happen on every save, so they must not
      undo manual changes. When a file is edited, each binding that still exists keeps its
      previous known result. An edit that changes a rule's result applies immediately; unrelated
      edits leave devices alone. A brand-new binding starts from the device's current state, like
@@ -876,9 +877,9 @@ on humidity > 90% for 30min:
 
 | ID | Topic | Status | Decision / current recommendation |
 |---|---|---|---|
-| D0 | Name / file extension | Open | — |
+| D0 | Name / file extension | Open | candidates in Appendix B |
 | D1 | Grammar base | **Decided** | custom Python-flavoured grammar, own parser |
-| D2 | Names | **Decided** | `let name = expr` for aliases and computed values; `:=` binds; one namespace across files (proposed) |
+| D2 | Names | **Decided** | `let name = expr` for aliases and computed values; `:=` binds full entity ids only; one namespace per file |
 | D3 | Attributes / string states | **Decided** | `entity.attr`; quoted strings, `on`/`off` keywords |
 | D4 | Units & literals | **Decided** | `5min`, `50%`, `22:00`, `sunset - 30min` |
 | D5 | Bindings & targets | **Decided** | `:=`; one writer per target; `keep`; built-in writer table; lights bound as a whole; other domains via actions in v1 |
@@ -897,12 +898,12 @@ on humidity > 90% for 30min:
 | D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; no catch-up after restarts (D17) |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `age(manual(x)) < D -> keep` |
 | D16 | Unknown handling | **Decided** | Kleene logic; unknown → keep; change times skip dropouts; a binding writes when its known result changes (device state stands in when there's no previous result) |
-| D17 | Restarts | **Proposed (revised)** | no storage of our own in v1; pre-restart change times are lower bounds; devices synced to definite results at boot; reloads keep previous results |
+| D17 | Restarts | **Decided** | no storage of our own in v1; pre-restart change times are lower bounds; devices synced to definite results at boot; reloads keep previous results |
 | D18 | Abstraction | **Decided: v2** | compile-time templates |
 | D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `cond -> value` arms |
 | D20 | "Since entering this state" | **Decided** | `fresh(x)`, only inside `state` blocks |
 | D21 | Manual-change detection | **Decided** | HA `Context` + differs from last write + not (un)availability; other automations count |
-| D22 | Declarative notifications | Open | `notify.x := <message or none>` bindings using tags/clear; v1 or v2 |
+| D22 | Declarative notifications | **Decided: not in v1** | maybe later: `notify.x := <message or none>` using tags/clear |
 
 ---
 
@@ -941,3 +942,22 @@ Treating events as timestamp-valued state, as HA does, removed all three.
 - `x after y` (generic "changed more recently than"): replaced by `latest` blocks for
   last-wins logic and `fresh()` inside state machines.
 - `new x`: renamed `fresh(x)`, because `new` means something very different in most languages.
+
+## Appendix B: name candidates (D0)
+
+Unchecked for clashes with existing projects, PyPI or HACS.
+
+| Name | Extension | Why |
+|---|---|---|
+| **Homeo** | `.homeo` | *Homeostasis*: a system that keeps itself in balance, which is what declarative rules do. "Your home, in balance." |
+| **HAbit** | `.habit` | **HA** + habit: teach your house good habits. |
+| **Ohm** | `.ohm` | "Ohm sweet ohm." Electrical, short, calm. |
+| **Hamlet** | `.hamlet` | **HA** + a small home. On/off is "2B or not 2B". |
+| **Dwell** | `.dwell` | A dwelling, and *dwell time* (`motion for 5min`). |
+| **Homespun** | `.spun` | Handmade and cosy; rules "spun" for your home. |
+| **HAven** | `.haven` | **HA** + a safe, calm home. |
+| **Domo** | `.domo` | *Domotics* (home automation), and a friendly "domo arigato". |
+| **Tend** | `.tend` | You tend a home; rules tend it for you. |
+| **Hygge** | `.hygge` | Danish cosiness. Friendly, but people may struggle to spell it. |
+| **Homebody** | `.homebody` | Friendly, a little silly. |
+| **HAiku** | `.haiku` | **HA** + short poems for your home. Clashes with Haiku OS. |
