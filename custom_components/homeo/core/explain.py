@@ -107,9 +107,7 @@ class _Explainer:
         if result is not UNKNOWN and result is not KEEP:
             out["device_matches"] = bool(b.writer.matches(state, result))
         out["last_written"] = (
-            "nothing since homeo started"
-            if s.last_written is NOTHING
-            else self.fmt_result(s.last_written, b)
+            "nothing yet" if s.last_written is NOTHING else self.fmt_result(s.last_written, b)
         )
         if s.dry_run:
             out["dry_run"] = True

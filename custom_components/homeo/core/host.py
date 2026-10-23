@@ -93,4 +93,9 @@ class Host(EntityCatalog, Protocol):
         """The machine's restored (value, change time), if HA restored one."""
         ...
 
+    def machine_stopped(self, name: str, file: str, loop: str | None) -> None:
+        """A state machine stopped after a loop (`loop` shows it, e.g. "a → b → a"), or runs
+        again (None): shown to the user as a Repairs issue."""
+        ...
+
     def log(self, level: str, message: str) -> None: ...

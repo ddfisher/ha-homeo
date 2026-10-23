@@ -23,6 +23,10 @@
     "compile_error": {
       "title": "Errors in Homeo rules: {file}",
       "description": "`{file}` couldn't be loaded. The previous version of the file keeps running until these are fixed:\n\n```\n{errors}\n```"
+    },
+    "machine_stopped": {
+      "title": "Homeo state machine stopped: {name}",
+      "description": "State machine `{name}` (in `{file}`) went round in a loop in one step: {loop}. Homeo stopped it, so it stays in its current state and ignores its rules.\n\nIt starts again when you pick a state for `select.homeo_{name}`, or when the rules are reloaded (for example by saving `{file}`). To stop it happening again, change the rules so that no state leads straight back to itself."
     }
   },
   "services": {

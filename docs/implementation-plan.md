@@ -146,7 +146,8 @@ A cell stores: current value, last known value, change time `ct` (an interval), 
 bool last became true), previous value, and its next wake-up time. Per D16, change times skip
 `unknown`: if a value goes `A → unknown → A`, `ct` doesn't move.
 
-`t(x)` (design §3) is the value itself for timestamp cells, and `t_true` for bool cells.
+`t(x)` (design §3) is `t_true` for bool cells. For timestamp cells it's the value itself once
+that's at or before now (I23).
 
 ### 2.3 Propagation (glitch-free)
 
@@ -165,7 +166,8 @@ loop:
     evaluate each machine whose arm inputs changed (or that just transitioned)
     if none transitioned: break
     apply transitions (ct = now), mark machines dirty; if a machine repeats a value in this
-    loop, report a loop error and stop that machine (D13b)
+    loop, report a loop error (log and Repairs issue) and stop that machine (D13b) until a
+    state is selected from its `select` entity or the rules are reloaded
 then: run bindings and actions on the settled values
 ```
 
@@ -180,7 +182,8 @@ one write.
   The runtime keeps one host timer for the earliest wake-up across all cells.
 - **I3. Time-of-day ranges** `now in A..B` are true when the most recent occurrence of `A`
   is later than the most recent occurrence of `B` (start inclusive, end exclusive). This handles
-  wrapping midnight and solar times uniformly. `A == B` is an empty range.
+  wrapping midnight and solar times uniformly. `A == B` is an empty range. `now >= 00:00`
+  (`now > 00:00`) is always true rather than the empty range `00:00..00:00`.
 - **I4. DST.** Daily times are resolved per local date with `zoneinfo`. A wall-clock time that
   doesn't exist that day (spring forward) resolves to the first instant after the gap; an
   ambiguous one (fall back) resolves to its first occurrence. So a daily time point fires
@@ -315,7 +318,13 @@ state; it must be compared first (checker error with a hint).
 **I17. Cycles.** `let` cycles are errors. A binding that reads its own target, directly or
 through `let`s or other bindings, is an error, except through `manual()` (D15). State machines
 break cycles (their arms see the previous value), so a binding may feed a machine that feeds the
-binding; runaway oscillation is caught by the runtime's loop detection.
+binding. The runtime's loop detection catches oscillation within one step; oscillation that
+goes out through a device and back (binding → device → machine → binding) isn't stopped.
+For now the checker warns when a binding's target is read, through a state machine, by its
+own rule (directly or through other bindings; `manual()` doesn't count): "`switch.pump` may
+switch back and forth forever: its rule reads state machine `m`, which reads `switch.pump`".
+Stopping such loops at run time would need each write's cause tracked through device echoes;
+an `xfail` test in `tests/core/test_edge_cases.py` records the gap.
 
 **I18. Writers: read-back tolerance and multi-attribute match.**
 - `on(...)` matches when the state is `on` and **every given parameter** matches; parameters not
@@ -335,7 +344,32 @@ keeps going after an error where it can).
 
 **I20. Dry run.** A `# mode: dry_run` directive (or the integration option "dry run all files")
 makes writes and actions log at INFO (`[dry run] would call light.turn_on {...}`) instead of
-calling services. Bindings still update `last_known_result` as if they had written.
+calling services. Bindings still update `last_known_result` as if they had written, so dry run
+logs only changes, but not `last_written`. When dry run is turned on, each binding forgets its
+last real write too: D21 rule 2 (a change back to what homeo last wrote isn't manual) exists to
+recognise late reports of homeo's writes, and dry run writes nothing, so it would only hide a
+person's change back to that old value. When dry run is turned off (directive removed, option cleared), each
+binding forgets its last result, so the device's state stands in and the device is brought in
+line once, as for a new binding (D16).
+
+**I23. Timestamps in the future.** A timestamp signal's `t(x)` is its most recent value at or
+before now: a value in the future (a phone's next-alarm sensor, `sensor.next_alarm - 30min`)
+happens when its time comes, and the runtime wakes up then. `on sensor.next_alarm:` fires when
+the alarm time arrives, not when the alarm is set or moved; `age()` counts from the last value
+that passed. Until one has been seen to pass (e.g. right after loading), the last occurrence is
+"some time before now", as for change times from before a restart (I1), so `age(x) < 10min` is
+unknown for 10 minutes, then false. The value itself is unchanged: `sensor.next_alarm - now`
+still reads the future time.
+
+A value that is replaced once its time has come happened, even if the update arrives before
+homeo's own wake-up for it has run: HA runs callbacks due at the same instant in any order, and
+a phone moves its next-alarm sensor on as the alarm rings. A value replaced at most 1 s before
+its time also happened, at the moment it was replaced, since the device's clock may be slightly
+ahead of HA's. Earlier than that, it was moved (or dismissed), not reached. So
+`on sensor.next_alarm:` follows HA's clock; for a device whose clock is further off, use an
+event from the device itself if it has one. Other wake-ups (`for`, `age()` thresholds, time
+points) can still race a state change by a few milliseconds; that's within what sensors can
+resolve anyway.
 
 **I21. `homeo.explain`** (§19) is a service that returns a response (Developer tools → Actions
 shows it as YAML; automations can use it too). Its `target` is a binding target

@@ -39,6 +39,7 @@ class FakeHost:
         self.logs: list[tuple[str, str]] = []
         self.machines: dict[str, tuple[str, float, list[str]]] = {}
         self.restored: dict[str, tuple[str, float]] = {}
+        self.stopped: dict[str, str] = {}  # machines stopped after a loop
         self.services: dict[tuple[str, str], bool] = {}
         self.simulate_devices = simulate_devices
         self.solar_times = {
@@ -148,6 +149,12 @@ class FakeHost:
 
     def log(self, level, message):
         self.logs.append((level, message))
+
+    def machine_stopped(self, name, file, loop):
+        if loop is None:
+            self.stopped.pop(name, None)
+        else:
+            self.stopped[name] = loop
 
     # ------------------------------------------------------------- driving
 
