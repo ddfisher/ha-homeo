@@ -1,11 +1,12 @@
-# ha-dsl: language design
+# Homeo: language design
 
 Status: **draft, in discussion.** Every choice has an ID (`D1`, `D2`, …) so we can refer to it.
 Each is marked **Decided**, **Proposed** (my recommendation, not yet agreed) or **Open**.
 Examples use decided syntax, or the recommended option where nothing is decided yet.
 Alternatives we compared in detail are kept in the appendix.
 
-File extension placeholder: `.hdsl` (name TBD, see D0).
+**Homeo** (from *homeostasis*: a system that keeps itself in balance). Rule files use `.homeo`,
+and the integration's domain is `homeo`.
 
 ---
 
@@ -32,7 +33,7 @@ Non-goals for v1: replacing HA's UI automation editor; dashboards; arbitrary Pyt
 | | Status |
 |---|---|
 | Ships as a **custom integration**, installable via **HACS** (`hacs.json`) | **Decided** |
-| Watches `<config>/ha_dsl/*.hdsl` and recompiles on save | **Decided** |
+| Watches `<config>/homeo/*.homeo` and recompiles on save | **Decided** |
 | The DSL has its own syntax, compiled inside HA at load time (not a Python library) | **Decided** |
 | Compile straight to an in-memory signal graph, not to Python source | **Decided** |
 | Reloads are atomic: if a file has errors, keep the old rules running and report | **Decided** |
@@ -124,7 +125,7 @@ messages. We can ship a VS Code / TextMate grammar later.
 - **Every line that changes a device is visibly marked by `:=`.** Plain `=` only appears in `let`
   and `state` declarations.
 - **Each file has its own namespace** for `let` and `state` names. To use another file's state
-  machine, read its entity (`select.ha_dsl_house`, D13d). State machine names must still be
+  machine, read its entity (`select.homeo_house`, D13d). State machine names must still be
   unique across files, because their entity ids would collide.
 - **Open idea (v2):** area-scoped blocks (`in area bathroom: fan := co2 > 800`), resolved through
   HA's area registry.
@@ -280,7 +281,7 @@ Each of these is a **timestamp signal**: its value is the time it last happened.
 | Event entity (HA 2023.8+: remotes, doorbells, buttons) | `event.hall_remote` | HA's own state. Its attributes (`event_type`, …) describe the last event. |
 | One event type | `event.hall_remote.double_press` (D8) | Time of the last event of that type. The runtime tracks this per type and persists it. |
 | Button helpers / button entities | `input_button.boost`, `button.x` | HA's own state: time of the last press |
-| Manual control | `manual(fan.bathroom)` | Time of the last change not made by ha_dsl (§15) |
+| Manual control | `manual(fan.bathroom)` | Time of the last change not made by homeo (§15) |
 | Time points | `07:00`, `sunset - 30min` | Time of the most recent occurrence (§12) |
 | Periodic | `every 10min` | Time of the most recent tick |
 | Raw bus events | `bus.zha_event(device_ieee: "…", command: "on")` | For integrations without event entities. Time of the last matching event, tracked by the runtime. |
@@ -366,7 +367,7 @@ After a restart (§17):
 ## 11. Temporal sugar (D11)
 
 Sugar is **defined as a rewrite into core constructs**, not as a separate feature. Error
-messages and `ha_dsl.explain` can show the expansion.
+messages and `homeo.explain` can show the expansion.
 
 | Sugar | Expands to | Status |
 |---|---|---|
@@ -523,7 +524,7 @@ against the inferred states (the initial value, literal results and `previous()`
 
 ### D13d. Visibility in HA (Decided: writable `select` entity)
 
-Each machine is exposed as `select.ha_dsl_<name>`. It shows in history and on dashboards, and can
+Each machine is exposed as `select.homeo_<name>`. It shows in history and on dashboards, and can
 be set from the UI. A manual selection is an ordinary change: `age()` resets, `fresh()` is
 relative to it, and `on` actions for the new value run. The entity also persists the machine's
 state across restarts (restore state).
@@ -663,7 +664,7 @@ Rejected alternatives:
 
 ### D21. Detecting manual changes (Decided)
 
-HA attaches a **`Context`** (`id`, `parent_id`, `user_id`) to every state change. When ha_dsl
+HA attaches a **`Context`** (`id`, `parent_id`, `user_id`) to every state change. When homeo
 calls a service, it creates the context and records its id. HA entities then use that context
 for the state writes caused by the call.
 
@@ -672,7 +673,7 @@ A change to a driven entity counts as **manual** when all of these hold:
    - a person in the UI or app (`user_id` set);
    - a physical switch or the device itself (no `user_id`, no `parent_id`);
    - another automation or script (`parent_id` set).
-2. **It moves the entity away from what ha_dsl last wrote.** This filters out late reports of
+2. **It moves the entity away from what homeo last wrote.** This filters out late reports of
    our own writes. HA only reuses a service call's context for writes within about 5 seconds,
    so a slow device that reports "on" 10 s later shows up with a fresh context. Because it
    matches what we wrote, it isn't counted.
@@ -801,11 +802,11 @@ with no runtime cost. Leaving this out of v1 is fine.
   column and a caret snippet. Old rules keep running until the file compiles.
 - **Dry-run mode** (per file: `# mode: dry_run`, or an integration option) logs the writes it
   would make instead of making them.
-- **`ha_dsl.explain`** service: given a target, it reports the current value of each
+- **`homeo.explain`** service: given a target, it reports the current value of each
   subexpression, with sugar expanded, and which arm is active ("fan.bathroom is ON because
   `age(remote.press) < 30min` (pressed 12 min ago)").
 - Optional diagnostic sensor per binding, whose attributes hold the active arm and reason.
-- Service calls carry a `Context` that HA's logbook attributes to ha_dsl and the rule's
+- Service calls carry a `Context` that HA's logbook attributes to homeo and the rule's
   file:line.
 
 ---
@@ -833,7 +834,7 @@ So `co2 > 800 for 5min or humidity > 60%` means `(co2 > 800 for 5min) or (humidi
 ## 21. Full example
 
 ```python
-# bathroom.hdsl
+# bathroom.homeo
 let co2      = sensor.bathroom_co2
 let humidity = sensor.bathroom_humidity
 let remote   = event.bathroom_remote
@@ -877,7 +878,7 @@ on humidity > 90% for 30min:
 
 | ID | Topic | Status | Decision / current recommendation |
 |---|---|---|---|
-| D0 | Name / file extension | Open | candidates in Appendix B |
+| D0 | Name / file extension | **Decided** | Homeo; `.homeo` files in `<config>/homeo/`; integration domain `homeo` |
 | D1 | Grammar base | **Decided** | custom Python-flavoured grammar, own parser |
 | D2 | Names | **Decided** | `let name = expr` for aliases and computed values; `:=` binds full entity ids only; one namespace per file |
 | D3 | Attributes / string states | **Decided** | `entity.attr`; quoted strings, `on`/`off` keywords |
@@ -893,7 +894,7 @@ on humidity > 90% for 30min:
 | D13a | State machine shape | **Decided (provisional)** | `state m = init:` + arms (TEA reducer); revisit after real use |
 | D13b | State machine semantics | **Decided** | arms are level-triggered conditions; chains with loop detection; restarts per D17 |
 | D13c | Referring to states | **Decided** | string comparison, compile-time checked |
-| D13d | Visibility in HA | **Decided** | writable `select.ha_dsl_<name>` |
+| D13d | Visibility in HA | **Decided** | writable `select.homeo_<name>` |
 | D13f | Reload & v2 deferrals | **Decided** | keep state across reloads if it still exists; nested states and extended state deferred to v2 |
 | D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; no catch-up after restarts (D17) |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `age(manual(x)) < D -> keep` |
@@ -945,7 +946,7 @@ Treating events as timestamp-valued state, as HA does, removed all three.
 
 ## Appendix B: name candidates (D0)
 
-Unchecked for clashes with existing projects, PyPI or HACS.
+**Chosen: Homeo.** `homeo` was free on PyPI when checked (2026-10). The other candidates:
 
 | Name | Extension | Why |
 |---|---|---|
