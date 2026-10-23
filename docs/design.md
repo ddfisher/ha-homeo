@@ -86,7 +86,7 @@ Top-level statements:
 | **Binding** `fan.x = <signal>` | keep this entity in sync with the signal |
 | **Definition** `stuffy = <signal>` | a named local signal, not an HA entity |
 | **State machine** `state mode = "init":` + arms | a named signal that remembers (§13) |
-| **Action** `on <signal>: <service calls>` | imperative escape hatch (notifications etc., §14) |
+| **Action** `on <signal>: <service calls>` | imperative escape hatch (notifications etc., §14). Top-level only. |
 
 Value types: `bool`, `number`, `string`, `duration`, `time-of-day`, `timestamp`. Any value can
 also be `unknown`. Type errors come with hints, e.g.
@@ -490,7 +490,7 @@ state across restarts (restore state).
 
 ---
 
-## 14. Actions and effects: D14 (Open, in discussion)
+## 14. Actions and effects: D14 (Decided)
 
 For things that aren't state: notifications, TTS, flashing a light, running a script.
 
@@ -504,6 +504,18 @@ on person.ann == "home" if night:
 on humidity > 90% for 30min:
     notify.mobile_app_phone(message: "Bathroom still very humid. Window open?")
 ```
+
+### `on` is top-level only
+
+`on x [if g]:` is a **top-level statement**, the same kind of thing as a binding or a `state`
+declaration. It can't appear anywhere else: not inside a `state` block, a binding, a cascade, a
+`latest` block, a `with` block, an expression, or another action's body. Each of those is a
+compile error with a hint:
+- inside a state machine: *"use `fresh(x)` for 'happened since entering this state'"*;
+- inside a binding or expression: *"use `age(x) < D` for 'happened recently'"*.
+
+This keeps the split clean. State machines and bindings are pure functions of signals and change
+times, and every effect in a file is visible at the top level.
 
 ### Why `on` is still needed
 
@@ -534,7 +546,7 @@ Both are meaningful, and they differ:
 | `on person.ann == "home" if night:` | Ann **arrives** while it's night. A daytime arrival is marked handled without running, so nightfall later doesn't trigger it. In FRP terms, this filters the arrival events. |
 | `on person.ann == "home" and night:` | "Ann home and it's night" **becomes true**: she arrives at night, *or* night falls while she's home. |
 
-### Option to consider: declarative notifications
+### D22. Declarative notifications (Open, v1 or v2)
 
 Many actions are really notifications, and notifications can be state. The HA mobile app
 supports a `tag` (a newer notification replaces the old one) and `clear_notification`. So a
@@ -551,8 +563,8 @@ back to `none` (here, when the washer leaves `done`). Restarts are handled by th
 "write only on change" rule as other bindings. It doesn't cover true one-offs (a ding per
 doorbell press, TTS, `flash()`), so `on` would remain for those.
 
-**Recommendation:** keep `on x [if g]:` as the single effect construct in v1. Decide separately
-whether declarative notification targets are worth adding (v1 or v2).
+**Decided:** `on x [if g]:` is the single effect construct. Whether to *also* add declarative
+notification targets, and in which version, is still open (D22).
 
 ### Other details (Proposed)
 
@@ -764,7 +776,7 @@ on humidity > 90% for 30min:
 | D13b | State machine semantics | **Decided** | arms are level-triggered conditions; chains with loop detection; restarts just re-evaluate |
 | D13c | Referring to states | **Decided** | string comparison, compile-time checked |
 | D13d | Visibility in HA | **Decided** | writable `select.ha_dsl_<name>` |
-| D14 | Actions / effects | **Open (in discussion)** | keep `on x [if g]:` as the one effect construct; maybe declarative notifications |
+| D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; catch-up capped at 1h (proposed) |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `age(manual(x)) < D -> keep` |
 | D16 | Unknown handling | Proposed | Kleene logic, unknown → keep, change times skip dropouts |
 | D17 | Startup | Proposed | write only if different from persisted last value |
@@ -772,6 +784,7 @@ on humidity > 90% for 30min:
 | D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `cond -> value` arms |
 | D20 | "Since entering this state" | **Decided** | `fresh(x)`, only inside `state` blocks |
 | D21 | Manual-change detection | **Decided** | HA `Context` + differs from last write + not (un)availability; other automations count |
+| D22 | Declarative notifications | Open | `notify.x = <message or none>` bindings using tags/clear; v1 or v2 |
 
 ---
 
