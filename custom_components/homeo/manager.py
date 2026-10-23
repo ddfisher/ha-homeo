@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, EVENT_STATE_CHANGED
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant, ServiceCall, ServiceResponse, callback
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_call_later
@@ -31,6 +32,7 @@ from .const import (
 )
 from .core.checker import Globals, check
 from .core.errors import CompileError, Diagnostic
+from .core.explain import NotFound, explain
 from .core.ir import Program
 from .core.parser import parse
 from .core.runtime import Runtime
@@ -253,6 +255,19 @@ class HomeoManager:
     def clear_report(self, file: str) -> None:
         if self.errors.pop(file, None) is not None:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id(file))
+
+    # --------------------------------------------------------------- explain
+
+    @callback
+    def explain(self, call: ServiceCall) -> ServiceResponse:
+        """`homeo.explain` (§19): why a binding, state machine or `let` has its value."""
+        target = call.data["target"]
+        if not self._started:
+            raise ServiceValidationError("Homeo hasn't loaded its rules yet")
+        try:
+            return {"explanations": explain(self.runtime, target)}
+        except NotFound as err:
+            raise ServiceValidationError(str(err)) from err
 
     # -------------------------------------------------------------- machines
 

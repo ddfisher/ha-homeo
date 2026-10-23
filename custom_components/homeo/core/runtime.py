@@ -659,7 +659,11 @@ class Runtime:
         return NOMATCH
 
     def _eval_latest(self, arms: list[ir.ArmIR | ir.GroupIR]) -> Any:
-        """The arm whose condition happened most recently (D19, I13)."""
+        return self.latest_choice(arms)[1]
+
+    def latest_choice(self, arms: list[ir.ArmIR | ir.GroupIR]) -> tuple[Any, Any]:
+        """The arm whose condition happened most recently (D19, I13), and the result.
+        The arm is None when the result is unknown."""
         else_arm = next((a for a in arms if isinstance(a, ir.ArmIR) and a.cond is None), None)
         cands = []
         for i, a in enumerate(arms):
@@ -680,17 +684,17 @@ class Runtime:
                     winner = (i, a, occ)
                     break
             if winner is None:
-                return UNKNOWN
+                return None, UNKNOWN
             _, a, _ = winner
             if isinstance(a, ir.ArmIR):
-                return self._eval(a.result)
+                return a, self._eval(a.result)
             r = self._eval_arms(a.arms)
             if r is not NOMATCH:
-                return r
+                return a, r
             cands.remove(winner)
         if else_arm is not None:
-            return self._eval(else_arm.result)
-        return UNKNOWN
+            return else_arm, self._eval(else_arm.result)
+        return None, UNKNOWN
 
     # ============================================================== propagation
 

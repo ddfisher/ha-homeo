@@ -32,11 +32,13 @@ custom_components/homeo/
     timeutil.py      time-of-day, daily time points, ranges, DST handling
     writers.py       per-target service mapping and read-back matching
     runtime.py       cells, propagation, scheduling, bindings, machines, actions
+    explain.py       homeo.explain: why a binding, machine or let has its value (I21)
     host.py          Host protocol (what the runtime needs from its environment)
 tests/
   core/              fast unit tests with a FakeHost and simulated clock (fakehost.py, rig.py)
   integration/       pytest-homeassistant-custom-component tests
 tools/make_icon.py   draws brand/icon.png and icon@2x.png
+tools/real_ha.py     smoke test in a full Home Assistant with the demo integration's devices
 hacs.json, LICENSE (MIT), README.md, requirements_test.txt, .github/workflows/tests.yml
 ```
 
@@ -330,6 +332,20 @@ keeps going after an error where it can).
 makes writes and actions log at INFO (`[dry run] would call light.turn_on {...}`) instead of
 calling services. Bindings still update `last_known_result` as if they had written.
 
+**I21. `homeo.explain`** (§19) is a service that returns a response (Developer tools → Actions
+shows it as YAML; automations can use it too). Its `target` is a binding target
+(`fan.bathroom`, `climate.x.temperature`), an entity (all its bindings), a state machine (`house`
+or `select.homeo_house`) or a `let` name (in every file that defines it). Each explanation has a
+one-line `summary`, the current result, for bindings the device's state, whether it matches and
+the last write, and per arm: the arm as written (with `let` names), its condition's value
+(`happened` for `latest` arms), whether it's the active one, and `values`: every non-constant
+subexpression with its current value, `let`s labelled by name and sugar expanded (`x for D`
+lists `age(x) >= D`). Values are JSON: bools and numbers as such; durations, times and
+intervals as text ("12min", "08:01:00 (12min ago)", "at least 3min" for a change time from
+before a restart). Explaining evaluates at the current time and changes no runtime state. The
+optional diagnostic sensor per binding (§19) isn't built: the service covers the need without
+adding entities.
+
 ---
 
 ## 4. Build order and milestones
@@ -393,7 +409,8 @@ HA; `.github/workflows/validate.yml` runs `hassfest` and the HACS action.
 
 ## 6. Implementation status (handoff)
 
-Last updated at the end of session 1, when PR ddfisher/ha-homeo#1 was merged into `main`.
+Last updated in session 2 (branch `claude/tender-einstein-ymrxoo`). Session 1 ended when PR
+ddfisher/ha-homeo#1 was merged into `main`.
 
 ### Where things stand
 
@@ -404,7 +421,7 @@ Last updated at the end of session 1, when PR ddfisher/ha-homeo#1 was merged int
 | M3 | Runtime core | **Done.** The §21 example runs through a scripted day; restarts, reloads and DST are covered. |
 | M4 | Writers | **Done.** The full v1 table with read-back tolerances (`core/writers.py`). |
 | M5 | HA integration | **First version done** (see below); a few polish items remain. |
-| M6 | Tooling | **Not started.** `homeo.explain` and the optional diagnostic sensor. Dry run is done (I20). |
+| M6 | Tooling | **Done.** `homeo.explain` (I21) and dry run (I20). The optional diagnostic sensor isn't built (I21). |
 | M7 | Editor panel | **Not started.** Research notes §15 has the HA APIs. |
 | — | Release | **Partly done:** `hacs.json`, MIT license, brand icon, README, tests and validation (`hassfest`, HACS) in CI. Missing: a GitHub release. |
 
@@ -426,7 +443,7 @@ M5 as built:
 
 ### What has been verified, and what hasn't
 
-- 280 tests: 265 core (FakeHost, simulated clock), 15 integration
+- 294 tests: 277 core (FakeHost, simulated clock), 17 integration
   (`pytest-homeassistant-custom-component`). They pass on HA 2026.10.2 / Python 3.14 (the CI
   setup) and on HA 2026.2.3 / Python 3.13 (the minimum in `hacs.json`). The full suite passed
   100 consecutive runs after the watcher's shutdown races were fixed.
@@ -478,8 +495,7 @@ M5 as built:
    entities~~ (done; `hassfest` also passes when run locally from HA core's source). The HACS
    action only runs once the repository is public (it can't validate private ones), and
    ignores the description and topics until they're set on GitHub.
-3. M6: `homeo.explain` (per-subexpression values, the active arm, sugar expanded). The IR's
-   `text` fields and the cells' change times are the raw material.
+3. ~~M6: `homeo.explain`~~ (done, I21).
 4. M7: the editor panel.
 5. First GitHub release.
 

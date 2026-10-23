@@ -189,6 +189,12 @@ async def main(config: Path, restart: bool) -> None:
         await asyncio.sleep(7)
         check("re-synced after the override", state(hass, "light.bed_light") == "on")
 
+        response = await hass.services.async_call(
+            "homeo", "explain", {"target": "fan.ceiling_fan"}, blocking=True, return_response=True
+        )
+        summary = response["explanations"][0]["summary"]
+        check("explain", "because `stuffy` (line 8)" in summary, summary)
+
         await call("input_button", "press", entity_id="input_button.boost")
         await asyncio.sleep(1)
         check("boost", state(hass, "fan.ceiling_fan", "percentage") == 100)

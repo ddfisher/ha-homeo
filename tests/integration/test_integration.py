@@ -5,6 +5,7 @@ from datetime import timedelta
 
 import pytest
 from homeassistant.core import Context, HomeAssistant, State
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
@@ -315,3 +316,25 @@ async def test_solar_times_match_the_sun_entity(hass: HomeAssistant, setup_homeo
     entry = await setup_homeo({"sun.homeo": "input_boolean.dark := now in sunset..sunrise\n"})
     dark = entry.runtime_data.runtime.binding("input_boolean.dark").last_known
     assert dark == (hass.states.get("sun.sun").state == "below_horizon")
+
+
+async def test_explain_service(hass: HomeAssistant, setup_homeo):
+    hass.states.async_set("sensor.bathroom_co2", "900", {"unit_of_measurement": "ppm"})
+    hass.states.async_set("fan.bathroom", "off")
+    async_mock_service(hass, "fan", "turn_on")
+    await setup_homeo({"bathroom.homeo": FAN})
+
+    response = await hass.services.async_call(
+        DOMAIN, "explain", {"target": "fan.bathroom"}, blocking=True, return_response=True
+    )
+    (e,) = response["explanations"]
+    assert e["binding"] == "fan.bathroom"
+    assert e["result"] == "on"
+    assert e["rule"] == "bathroom.homeo:2"
+    assert [a.get("active", False) for a in e["arms"]] == [False, True]
+    assert e["arms"][1]["values"] == {"sensor.bathroom_co2": 900}
+
+    with pytest.raises(ServiceValidationError, match="did you mean `fan.bathroom`"):
+        await hass.services.async_call(
+            DOMAIN, "explain", {"target": "fan.bathrom"}, blocking=True, return_response=True
+        )

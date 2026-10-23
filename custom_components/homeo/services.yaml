@@ -1,1 +1,8 @@
 reload:
+explain:
+  fields:
+    target:
+      required: true
+      example: fan.bathroom
+      selector:
+        text:
