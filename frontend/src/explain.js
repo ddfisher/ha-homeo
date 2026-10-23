@@ -44,16 +44,22 @@ function armText(s) {
   return s.split(" -> ").map(esc).join(` <span class="arrow">-&gt;</span>\u00a0`);
 }
 
+/** A round true/false/unknown mark, as used for arms and the device check. */
+function mark(kind, label) {
+  const sym = { yes: "✓", no: "✗", unknown: "?", idle: "·" }[kind];
+  return `<span class="mark ${kind}" title="${label}" aria-label="${label}">${sym}</span>`;
+}
+
 function arm(a) {
   const isGroup = "guard" in a;
   const cond = "condition" in a ? a.condition : undefined;
-  const [mark, state, label] = a.active
-    ? ["✓", "active", "decides the result"]
+  const [kind, state, label] = a.active
+    ? ["yes", "active", "decides the result"]
     : cond === false
-      ? ["✗", "off", "condition is false"]
+      ? ["no", "off", "condition is false"]
       : cond === "unknown"
-        ? ["?", "unknown", "condition is unknown"]
-        : ["·", "idle", "not used"];
+        ? ["unknown", "unknown", "condition is unknown"]
+        : ["idle", "idle", "not used"];
   const facts = [];
   if (cond !== undefined) facts.push(["condition", value(cond)]);
   if (a.happened !== undefined) facts.push(["happened", esc(a.happened)]);
@@ -63,8 +69,20 @@ function arm(a) {
     : "";
   const sub = isGroup ? `<ul class="arms">${a.arms.map(arm).join("")}</ul>` : "";
   return `<li class="arm ${state}${isGroup ? " group" : ""}">
-    <div class="arm-head"><span class="mark" title="${label}">${mark}</span><code>${armText(isGroup ? a.guard : a.arm)}</code><span class="line">line ${a.line}</span></div>
+    <div class="arm-head">${mark(kind, label)}<code>${armText(isGroup ? a.guard : a.arm)}</code><span class="line">line ${a.line}</span></div>
     ${factsHtml}${values(a.values)}${sub}</li>`;
+}
+
+const isElse = (a) => !("guard" in a) && !("condition" in a) && !("happened" in a);
+const anyActive = (arms) => arms.some((a) => a.active || ("arms" in a && anyActive(a.arms)));
+
+/** When no arm applies and there's no `else`: what happens instead, as an arm of its own.
+ * A machine or binding keeps its value; a `let` is unknown. */
+function implicitElse(e, arms) {
+  if (anyActive(arms) || arms.some(isElse)) return "";
+  const result = e.let ? "unknown" : "keep";
+  return `<li class="arm active implicit">
+    <div class="arm-head">${mark("yes", "no arm applies")}<code>${armText(`else -> ${result}`)}</code><span class="line">implicit</span></div></li>`;
 }
 
 /** One explanation (a binding, machine or let) as HTML. */
@@ -72,6 +90,9 @@ export function explanationHtml(e) {
   const title = e.binding ?? e.machine ?? e.let;
   const kind = e.binding ? "binding" : e.machine ? "state machine" : "let";
   const where = e.rule ?? e.file;
+  // A binding's summary only repeats its result and deciding arm, shown below; keep it when
+  // the result is unknown, where it says why.
+  const summary = e.binding && e.result !== "unknown" ? null : e.summary;
   const facts = [];
   if ("result" in e) facts.push(["result", `<strong>${value(e.result)}</strong>`]);
   if ("value" in e) facts.push(["value", `<strong>${value(e.value)}</strong>`]);
@@ -82,13 +103,13 @@ export function explanationHtml(e) {
   if ("previous" in e) facts.push(["previous", esc(e.previous)]);
   if ("device" in e) {
     const match = e.device_matches;
-    const badge =
+    const check =
       match === true
-        ? ` <span class="badge ok">matches</span>`
+        ? ` ${mark("yes", "matches the result")}`
         : match === false
-          ? ` <span class="badge warn">differs</span>`
+          ? ` ${mark("no", "differs from the result")}`
           : "";
-    facts.push(["device now", esc(e.device) + badge]);
+    facts.push(["device now", esc(e.device) + check]);
   }
   if ("last_written" in e) facts.push(["last written", esc(e.last_written)]);
   if (e.stopped) facts.push(["stopped", `<span class="error">${esc(e.stopped)}</span>`]);
@@ -96,14 +117,15 @@ export function explanationHtml(e) {
   const section = (label, html) => `<div class="section-label">${label}</div>${html}`;
   let detail = "";
   if (arms) {
-    const how = e.latest ? "the latest to happen wins" : "the first that holds wins";
-    detail = section(`Arms <span class="how">· ${how}</span>`, `<ul class="arms">${arms.map(arm).join("")}</ul>`);
+    const how = e.latest ? "the latest to happen wins" : "checked top to bottom";
+    const list = arms.map(arm).join("") + implicitElse(e, arms);
+    detail = section(`Arms <span class="how">· ${how}</span>`, `<ul class="arms">${list}</ul>`);
   } else if (e.values && Object.keys(e.values).length) {
     detail = section("Values", values(e.values));
   }
   return `<section class="expl">
     <header><code class="name">${esc(title)}</code><span class="kind">${kind}</span>${where ? `<span class="where">${esc(where)}</span>` : ""}</header>
-    ${e.summary ? `<p class="summary">${prose(e.summary)}</p>` : ""}
+    ${summary ? `<p class="summary">${prose(summary)}</p>` : ""}
     <dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>
     ${detail}
   </section>`;

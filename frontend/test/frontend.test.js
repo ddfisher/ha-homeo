@@ -143,11 +143,33 @@ test("explanation html", () => {
     ],
   });
   assert.match(html, /<span class="where">test\.homeo:5<\/span>/);
-  assert.match(html, /because <code>x &#62; 1<\/code>/);
-  assert.match(html, /<span class="badge warn">differs<\/span>/);
+  assert.doesNotMatch(html, /class="summary"/); // a binding's summary repeats what's below
+  assert.match(html, /<span class="mark no" title="differs from the result"/);
   assert.match(html, /<li class="arm active">/);
   assert.match(html, /<li class="arm idle">/);
   assert.ok(html.includes(`x &#62; 1 <span class="arrow">-&gt;</span>\u00a0on`)); // wraps before `->` only
   assert.match(html, /<code class="expr">x<\/code><span class="val">2<\/span>/);
-  assert.match(html, /the first that holds wins/);
+  assert.match(html, /checked top to bottom/);
+  assert.doesNotMatch(html, /implicit/); // it has an `else`
+});
+
+test("explanation html: unknown binding keeps its summary, with code", () => {
+  const html = explanationHtml({ binding: "switch.pump", result: "unknown", summary: "left as it is (`keep`)" });
+  assert.match(html, /<p class="summary">left as it is \(<code>keep<\/code>\)<\/p>/);
+});
+
+test("explanation html: implicit else when no arm applies", () => {
+  const groups = [
+    { guard: "a", line: 3, condition: true, arms: [{ arm: "b -> 1", line: 4, condition: false }] },
+    { arm: "c -> 2", line: 5, condition: "unknown" },
+  ];
+  const machine = explanationHtml({ machine: "mode", state: "x", summary: "s", arms: groups });
+  assert.match(machine, /<li class="arm active implicit">/);
+  assert.ok(machine.includes(`else <span class="arrow">-&gt;</span>\u00a0keep`));
+  assert.match(machine, /<p class="summary">s<\/p>/); // machines keep their summary
+  const let_ = explanationHtml({ let: "v", file: "f", value: "unknown", arms: groups });
+  assert.ok(let_.includes(`else <span class="arrow">-&gt;</span>\u00a0unknown`));
+  // an arm inside a group decides: no implicit else
+  groups[0].arms[0].active = true;
+  assert.doesNotMatch(explanationHtml({ machine: "mode", arms: groups }), /implicit/);
 });
