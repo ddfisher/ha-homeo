@@ -319,8 +319,12 @@ state; it must be compared first (checker error with a hint).
 through `let`s or other bindings, is an error, except through `manual()` (D15). State machines
 break cycles (their arms see the previous value), so a binding may feed a machine that feeds the
 binding. The runtime's loop detection catches oscillation within one step; oscillation that
-goes out through a device and back (binding → device → machine → binding) isn't caught yet
-(a known bug, recorded as an `xfail` test in `tests/core/test_edge_cases.py`).
+goes out through a device and back (binding → device → machine → binding) isn't stopped.
+For now the checker warns when a binding's target is read, through a state machine, by its
+own rule (directly or through other bindings; `manual()` doesn't count): "`switch.pump` may
+switch back and forth forever: its rule reads state machine `m`, which reads `switch.pump`".
+Stopping such loops at run time would need each write's cause tracked through device echoes;
+an `xfail` test in `tests/core/test_edge_cases.py` records the gap.
 
 **I18. Writers: read-back tolerance and multi-attribute match.**
 - `on(...)` matches when the state is `on` and **every given parameter** matches; parameters not

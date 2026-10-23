@@ -205,6 +205,9 @@ class Checker:
         self.machine_decls: dict[str, A.StateDecl] = {}
         self.domains = set(KNOWN_DOMAINS) | set(catalog.domains())
         self.binding_reads: dict[str, set[tuple[str, str | None]]] = {}
+        # the same, also following state machines' arms (for the loop warning)
+        self.binding_reads_via_machines: dict[str, set[tuple[str, str | None]]] = {}
+        self.binding_machines: dict[str, set[str]] = {}  # target key -> machines it reads
         self._on_spans: dict[int, dict[str, Span]] = {}  # setting name spans of on(...)
 
     # ---------------------------------------------------------------- driver
@@ -1165,6 +1168,9 @@ class Checker:
             self.check_result(r, writer, key)
         reads = self.reads(value)
         self.binding_reads[key] = reads
+        machines: set[str] = set()
+        self.binding_reads_via_machines[key] = self.reads(value, machines)
+        self.binding_machines[key] = machines
         for eid, a in reads:
             if self.affects(entity_id, writer, eid, a):
                 self.fail(
@@ -1259,8 +1265,10 @@ class Checker:
         """Whether reading (read_eid, read_attr) reads the target this writer drives."""
         return read_eid == entity_id and read_attr in writer.read_attrs
 
-    def reads(self, n: ir.Node) -> set[tuple[str, str | None]]:
-        """Entity reads a value depends on (through cells, not through machines or manual())."""
+    def reads(self, n: ir.Node, machines: set[str] | None = None) -> set[tuple[str, str | None]]:
+        """Entity reads a value depends on (through cells, not through manual()). Machines
+        break cycles (I17), so their arms are followed only when `machines` is given; it
+        collects the names of the machines read."""
         out: set[tuple[str, str | None]] = set()
         seen: set[int] = set()
 
@@ -1272,20 +1280,74 @@ class Checker:
                 out.add((c.entity_id, c.attr))
             elif isinstance(c, ir.EventTypeCell):
                 out.add((c.entity_id, None))
-            elif isinstance(c, (ir.ManualCell, ir.MachineCell)):
+            elif isinstance(c, ir.ManualCell):
                 return
+            elif isinstance(c, ir.MachineCell):
+                if machines is None:
+                    return
+                machines.add(c.name)
             for d in c.deps():
                 cell(d)
 
         for c in ir.node_cells(n):
-            if isinstance(c, ir.MachineCell):
-                continue
             cell(c)
         return out
 
     def check_binding_cycles(self) -> None:
+        cycle = self.binding_cycle(self.binding_reads, min_len=2)
+        if cycle is not None:
+            b, path = cycle
+            self.error(
+                "bindings drive each other in a loop: " + " → ".join(path),
+                b.span,
+                "break the loop, e.g. with a state machine or `manual()`",
+            )
+            return
+        # Through a state machine, a loop is allowed (I17) but the runtime can't stop it if
+        # it goes round through a device: binding → device → machine → binding.
+        cycle = self.binding_cycle(self.binding_reads_via_machines, min_len=1)
+        if cycle is not None:
+            b, path = cycle
+            names = sorted(
+                m
+                for m in {m for k in path for m in self.binding_machines.get(k, ())}
+                if self.machine_reads_any(m, path)
+            )
+            what = ("state machine " if len(names) == 1 else "state machines ") + ", ".join(
+                f"`{m}`" for m in names
+            )
+            if len(path) == 2:
+                how = f"its rule reads {what}, which reads `{b.key}`"
+            else:
+                loop = " → ".join(f"`{k}`" for k in path)
+                how = f"these bindings and {what} drive each other in a loop: {loop}"
+            self.sink.warning(
+                f"`{b.key}` may switch back and forth forever: {how}",
+                b.span,
+                "make sure a change these rules make can't move the machine to a state that "
+                "undoes it; homeo doesn't stop such a loop",
+            )
+
+    def machine_reads_any(self, name: str, keys: list[str]) -> bool:
+        """Whether a machine's arms read (through anything but manual()) one of these
+        binding targets."""
+        m = self.machines[name]
+        reads = self.reads(ir.Read(T.STRING, m.span, name, False, m), set())
+        for k in keys:
+            parts = k.split(".")
+            w = WRITERS.get((parts[0], parts[2] if len(parts) > 2 else None))
+            eid = ".".join(parts[:2])
+            if w is not None and any(self.affects(eid, w, e, a) for e, a in reads):
+                return True
+        return False
+
+    def binding_cycle(
+        self, own_reads: dict[str, set[tuple[str, str | None]]], min_len: int
+    ) -> tuple[ir.BindingDef, list[str]] | None:
+        """A binding in this file that drives itself through other bindings' reads: the
+        binding and the loop's path of target keys."""
         all_reads = dict(self.globals.binding_reads)
-        all_reads.update(self.binding_reads)
+        all_reads.update(own_reads)
         targets: dict[str, tuple[str, Writer | None]] = {}
         for k in all_reads:
             if k in self.globals.targets or any(b.key == k for b in self.program.bindings):
@@ -1308,16 +1370,12 @@ class Checker:
             while stack:
                 k, path = stack.pop()
                 for nxt in edges(k):
-                    if nxt == b.key and len(path) > 1:
-                        self.error(
-                            "bindings drive each other in a loop: " + " → ".join(path + [b.key]),
-                            b.span,
-                            "break the loop, e.g. with a state machine or `manual()`",
-                        )
-                        return
+                    if nxt == b.key and len(path) >= min_len:
+                        return b, path + [b.key]
                     if nxt not in visited:
                         visited.add(nxt)
                         stack.append((nxt, path + [nxt]))
+        return None
 
     def reads_for_globals(self) -> dict[str, set[tuple[str, str | None]]]:
         return dict(self.binding_reads)

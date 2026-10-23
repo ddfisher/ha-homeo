@@ -394,8 +394,8 @@ def test_now_before_midnight_is_always_false():
 
 @pytest.mark.xfail(
     strict=True,
-    reason="I17 says oscillation through a state machine is caught by the runtime's loop "
-    "detection, but that only sees one propagation; a loop through the device spans many",
+    reason="the runtime's loop detection sees one step only, so a loop through a device "
+    "isn't stopped; for now the checker warns about such rules (I17)",
 )
 def test_oscillation_through_a_device_and_a_machine_is_stopped():
     h = standard_world()

@@ -185,7 +185,7 @@ rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts ar
 | I14 | Entity types | Inferred from domain, then attributes/current state; `any` when unsure |
 | I15 | Units | Only `%` is interpreted (scaled for light `brightness`); other units compare as plain numbers |
 | I16 | Time arithmetic | `ts − ts → duration`, `ts ± duration`, `time-of-day ± duration`; clock-moving values must be compared before use as results |
-| I17 | Cycles | `let` and binding cycles are errors (except via `manual()`); state machines break cycles |
+| I17 | Cycles | `let` and binding cycles are errors (except via `manual()`); state machines break cycles, with a warning when a binding's target feeds back into its own rule through a machine (the runtime can't stop that loop) |
 | I18 | Writer read-back | `on(...)` matches when every given parameter matches; per-attribute tolerances; transitional states match their goal; `text.*` accepted like `input_text.*` |
 | I19 | Error format | `file:line:col: error: …`, caret snippet, optional `hint:` |
 | I20 | Dry run | `# mode: dry_run` directive or an integration option; logs would-be calls. Turning it off brings devices in line once, as for a new binding |

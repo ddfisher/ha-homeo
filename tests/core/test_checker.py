@@ -375,8 +375,8 @@ def test_bindings_loop(host):
     assert "loop" in d.message
 
 
-def test_loop_through_machine_is_allowed(host):
-    ok(
+def test_loop_through_machine_is_allowed_with_a_warning(host):
+    p = ok(
         host,
         """
 state m = "a":
@@ -384,6 +384,54 @@ state m = "a":
 light.hall := m == "a"
 """,
     )
+    (w,) = p.warnings
+    assert w.message == (
+        "`light.hall` may switch back and forth forever: its rule reads state machine `m`, "
+        "which reads `light.hall`"
+    )
+    assert "homeo doesn't stop such a loop" in w.hint
+
+
+def test_loop_through_machine_and_another_binding_warns(host):
+    p = ok(
+        host,
+        """
+state m = "a":
+    m == "a" and light.porch -> "b"
+switch.pump := m == "a"
+light.porch := switch.pump
+""",
+    )
+    assert [w.message for w in p.warnings] == [
+        "`switch.pump` may switch back and forth forever: these bindings and state machine "
+        "`m` drive each other in a loop: `switch.pump` → `light.porch` → `switch.pump`"
+    ]
+
+
+def test_loop_through_machine_via_a_let_warns(host):
+    p = ok(
+        host,
+        """
+state m = "a":
+    m == "a" and switch.pump -> "b"
+let pumping = m == "a"
+switch.pump := pumping
+""",
+    )
+    assert "may switch back and forth forever" in p.warnings[0].message
+
+
+def test_machine_reading_only_manual_or_other_entities_doesnt_warn(host):
+    p = ok(
+        host,
+        """
+state m = "a":
+    m == "a" and age(manual(switch.pump)) < 1h -> "b"
+    m == "b" and binary_sensor.hall_motion     -> "a"
+switch.pump := m == "a"
+""",
+    )
+    assert p.warnings == []
 
 
 def test_notify_binding_not_in_v1(host):
@@ -550,6 +598,7 @@ def test_full_design_example(host):
     assert [b.key for b in p.bindings] == ["fan.bathroom", "light.bathroom"]
     assert p.machines[0].name == "bath_mode"
     assert p.cells["state:sensor.bathroom_co2"].type == T.NUMBER
+    assert p.warnings == []
 
 
 def test_multiple_errors(host):
