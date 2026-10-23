@@ -697,8 +697,9 @@ Known limits:
   "Previous" means the last *known* result, skipping `unknown` periods:
   - `on → unknown → off` writes `off`;
   - `on → unknown → on` writes nothing;
-  - if there is no previous known result at all, the first known result isn't a change, so
-    nothing is written. That happens after a restart (§17) and for a brand-new binding.
+  - if there is no previous known result (after a restart, or for a brand-new binding), the
+    **device's current state** stands in for it. The binding writes its first known result only
+    if the device doesn't already match it.
 - Fallbacks: `co2 ?? 0`, or `available(sensor.co2)` as an explicit test.
 - In cascades and `latest`, an `unknown` condition falls through to the next arm. (The
   alternative, making the whole result `unknown`, is safer but brittle: one flaky sensor would
@@ -709,10 +710,11 @@ Known limits:
 
 ---
 
-## 17. Startup and restarts: D17 (Decided)
+## 17. Startup and restarts: D17 (Proposed, revised)
 
-Restarts are rare, so v1 aims for behaviour that is **predictable and never surprising**, not
-exact catch-up. **Principle: a restart never moves a device by itself.**
+Restarts are rare, so v1 aims for **simple, predictable** behaviour, not exact catch-up.
+**Principle: after a restart, devices are brought in line with their rules, but only once a
+rule's result is definite.**
 
 **What survives a restart without any storage of ours:**
 - **Timestamp entities** (`event.*`, `input_button.*`, `button.*`): their state *is* the time,
@@ -744,17 +746,21 @@ exact catch-up. **Principle: a restart never moves a device by itself.**
 
    So `light.hall := motion or age(motion) < 10min` doesn't switch the light on after a reboot.
 3. **Bindings need no restart rule of their own.** A binding's previous result isn't stored, so
-   after a restart it's `unknown`. By D16, the first known result is then not a change, and
-   nothing is written. Writes resume on the next change of that result. This means:
-   - a device that should have changed while HA was down catches up at the next relevant change,
-     not at boot;
-   - a manual change made before the restart survives it until the rule's result next changes;
-   - a timed override (`age(manual(x)) < 1h -> keep`) becomes "until the next change".
+   by D16 the device's current state stands in for it. As soon as a rule's result is definite,
+   the device is brought in line if it doesn't already match. This means:
+   - a device that should have changed while HA was down catches up at boot (e.g. blinds that
+     should have opened at 07:00);
+   - results that are `unknown` right after boot (rule 2) wait until they're definite, so a motion
+     light isn't switched on because of the reboot;
+   - **accepted cost:** a manual change made before the restart is overridden if its rule
+     disagrees, since `manual()` history isn't kept. Restarts are rare enough for this to be
+     fine in v1.
 4. **Actions treat everything before the restart as handled.** No catch-up.
-   - **Rule reloads are not restarts (Proposed).** When a file is edited, each binding that
-     still exists keeps its previous known result. An edit that changes a rule's result
-     therefore applies immediately. A brand-new binding waits for its first change, as above.
-     A `ha_dsl.resync` service can force bindings to write their current result.
+   - **Rule reloads are not restarts (Proposed).** Reloads happen on every save, so they must not
+     undo manual changes. When a file is edited, each binding that still exists keeps its
+     previous known result. An edit that changes a rule's result applies immediately; unrelated
+     edits leave devices alone. A brand-new binding starts from the device's current state, like
+     after a restart.
 5. **State machines** keep their restored value and re-evaluate (§13). A 07:00 transition missed
    during downtime still happens at boot. Arms on bool conditions wait until those conditions
    change again.
@@ -762,8 +768,7 @@ exact catch-up. **Principle: a restart never moves a device by itself.**
 **Things we could add later, each on its own, if reboots turn out to matter more:**
 - persist `manual()` timestamps, so timed overrides survive restarts;
 - persist each action's last-handled time, for capped catch-up of missed actions;
-- persist last-written values, so bindings can re-sync at boot when an input changed during the
-  downtime;
+- persist last-written values, so a manual change made before a restart survives it;
 - read change times from HA's recorder, when it's enabled and keeps the entity, for exact `age()`.
 
 Earlier approvals that this replaces:
@@ -891,8 +896,8 @@ on humidity > 90% for 30min:
 | D13f | Reload & v2 deferrals | **Decided** | keep state across reloads if it still exists; nested states and extended state deferred to v2 |
 | D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; no catch-up after restarts (D17) |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `age(manual(x)) < D -> keep` |
-| D16 | Unknown handling | **Decided** | Kleene logic; unknown → keep; change times skip dropouts; a binding writes only between known results |
-| D17 | Restarts | **Decided** (reload details proposed) | no storage of our own in v1; pre-restart change times are lower bounds; no binding writes until a result changes (via D16); reloads keep previous results |
+| D16 | Unknown handling | **Decided** | Kleene logic; unknown → keep; change times skip dropouts; a binding writes when its known result changes (device state stands in when there's no previous result) |
+| D17 | Restarts | **Proposed (revised)** | no storage of our own in v1; pre-restart change times are lower bounds; devices synced to definite results at boot; reloads keep previous results |
 | D18 | Abstraction | **Decided: v2** | compile-time templates |
 | D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `cond -> value` arms |
 | D20 | "Since entering this state" | **Decided** | `fresh(x)`, only inside `state` blocks |
