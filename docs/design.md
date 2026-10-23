@@ -361,7 +361,7 @@ press for buttons and events, and the moment it last became true for bool condit
 light.desk := latest
     input_button.desk_on       -> on
     input_button.desk_off      -> off
-    else                       -> off          # neither has ever happened
+    else                       -> keep         # neither has ever been pressed
 
 let blinds_mode = latest
     input_button.blinds_auto   -> "auto"
@@ -372,7 +372,8 @@ let blinds_mode = latest
 - **Arms use the same syntax as cascades** (`cond -> result`, with `|` sub-arms). Results can be
   any expression.
 - **`else`** is used when none of the conditions has ever happened. It's required in bindings,
-  as with cascades.
+  as with cascades, and is usually `keep` ("no opinion yet"). In a `let`, it may be left out; the
+  value is then `unknown` until one of the conditions has happened (D16).
 - **Conditions must be bools or timestamps.** Anything else is a type error.
 - **Ties** (same occurrence time): the first arm wins.
 
@@ -410,7 +411,7 @@ Hysteresis needs no sugar; it's a `latest` block. Each condition counts from the
 fan.bedroom := latest
     co2 > 800                  -> on             # turns on when co2 rises above 800
     co2 < 700                  -> off            # turns off when co2 falls below 700
-    else                       -> off            # neither has happened yet
+    else                       -> keep           # neither has happened yet: leave the fan alone
 ```
 
 ### Maybe later
@@ -871,8 +872,7 @@ let motion   = binary_sensor.bathroom_motion
 
 let co2_high = latest                 # hysteresis: on above 800, off below 700
     co2 > 800                         -> true
-    co2 < 700                         -> false
-    else                              -> false
+    co2 < 700                         -> false     # no else: unknown until co2 crosses either
 let stuffy   = co2_high or humidity > 70% for 2min
 let night    = now in 22:00..07:00
 
