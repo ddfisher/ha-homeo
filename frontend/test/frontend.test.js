@@ -5,7 +5,7 @@ import { StringStream } from "@codemirror/language";
 import { Text } from "@codemirror/state";
 
 import { diagnosticsToCodeMirror } from "../src/diagnostics.js";
-import { statementTarget } from "../src/explain.js";
+import { explanationHtml, prose, statementTarget } from "../src/explain.js";
 import { validFileName } from "../src/files.js";
 import { homeoStream } from "../src/language.js";
 
@@ -120,4 +120,34 @@ test("file names: anything the integration loads, nothing outside the folder", (
   for (const bad of ["../x.homeo", "a/b.homeo", "a\\b.homeo", ".hidden.homeo", ".homeo", "x.txt", "a\0.homeo"]) {
     assert.ok(!validFileName(bad), bad);
   }
+});
+
+test("explain prose shows backtick spans as code, escaped", () => {
+  assert.equal(
+    prose("no binding named `a<b`; did you mean `fan.x`"),
+    "no binding named <code>a&#60;b</code>; did you mean <code>fan.x</code>",
+  );
+});
+
+test("explanation html", () => {
+  const html = explanationHtml({
+    binding: "fan.bathroom",
+    rule: "test.homeo:5",
+    result: "on",
+    summary: "fan.bathroom should be on, because `x > 1` (line 7)",
+    device: "off",
+    device_matches: false,
+    arms: [
+      { arm: "x > 1 -> on", line: 7, condition: true, active: true, values: { x: 2 } },
+      { arm: "else -> off", line: 8 },
+    ],
+  });
+  assert.match(html, /<span class="where">test\.homeo:5<\/span>/);
+  assert.match(html, /because <code>x &#62; 1<\/code>/);
+  assert.match(html, /<span class="badge warn">differs<\/span>/);
+  assert.match(html, /<li class="arm active">/);
+  assert.match(html, /<li class="arm idle">/);
+  assert.ok(html.includes(`x &#62; 1 <span class="arrow">-&gt;</span>\u00a0on`)); // wraps before `->` only
+  assert.match(html, /<code class="expr">x<\/code><span class="val">2<\/span>/);
+  assert.match(html, /the first that holds wins/);
 });

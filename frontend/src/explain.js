@@ -18,6 +18,11 @@ export function statementTarget(text, line) {
   return null;
 }
 
+/** Text with `backtick` spans shown as code, as in summaries and error messages. */
+export function prose(s) {
+  return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
 function value(v) {
   if (v === true) return `<span class="v-true">true</span>`;
   if (v === false) return `<span class="v-false">false</span>`;
@@ -25,52 +30,81 @@ function value(v) {
   return esc(v);
 }
 
+/** Subexpressions and their current values: expression on the left, value on the right. */
 function values(vals) {
   if (!vals || !Object.keys(vals).length) return "";
   const rows = Object.entries(vals)
-    .map(([k, v]) => `<tr><td><code>${esc(k)}</code></td><td>${value(v)}</td></tr>`)
+    .map(([k, v]) => `<div class="row"><code class="expr">${esc(k)}</code><span class="val">${value(v)}</span></div>`)
     .join("");
-  return `<table class="values">${rows}</table>`;
+  return `<div class="values">${rows}</div>`;
+}
+
+/** An arm's source, wrapping before `->` rather than inside it. */
+function armText(s) {
+  return s.split(" -> ").map(esc).join(` <span class="arrow">-&gt;</span>\u00a0`);
 }
 
 function arm(a) {
   const isGroup = "guard" in a;
   const cond = "condition" in a ? a.condition : undefined;
-  const mark = a.active ? "✓" : cond === false ? "✗" : cond === "unknown" ? "?" : "·";
-  const cls = ["arm", a.active ? "active" : "", cond === false ? "off" : ""].join(" ");
-  const head = `<code>${esc(isGroup ? a.guard : a.arm)}</code>`;
+  const [mark, state, label] = a.active
+    ? ["✓", "active", "decides the result"]
+    : cond === false
+      ? ["✗", "off", "condition is false"]
+      : cond === "unknown"
+        ? ["?", "unknown", "condition is unknown"]
+        : ["·", "idle", "not used"];
   const facts = [];
-  if (cond !== undefined) facts.push(`condition: ${value(cond)}`);
-  if (a.happened !== undefined) facts.push(`happened: ${esc(a.happened)}`);
-  if (a.result !== undefined) facts.push(`result: ${value(a.result)}`);
+  if (cond !== undefined) facts.push(["condition", value(cond)]);
+  if (a.happened !== undefined) facts.push(["happened", esc(a.happened)]);
+  if (a.result !== undefined) facts.push(["result", value(a.result)]);
+  const factsHtml = facts.length
+    ? `<div class="arm-facts">${facts.map(([k, v]) => `<span class="fact"><span class="k">${k}</span> ${v}</span>`).join("")}</div>`
+    : "";
   const sub = isGroup ? `<ul class="arms">${a.arms.map(arm).join("")}</ul>` : "";
-  return `<li class="${cls}"><div class="arm-head"><span class="mark">${mark}</span>${head}<span class="line">line ${a.line}</span></div>
-    ${facts.length ? `<div class="facts">${facts.join(" · ")}</div>` : ""}${values(a.values)}${sub}</li>`;
+  return `<li class="arm ${state}${isGroup ? " group" : ""}">
+    <div class="arm-head"><span class="mark" title="${label}">${mark}</span><code>${armText(isGroup ? a.guard : a.arm)}</code><span class="line">line ${a.line}</span></div>
+    ${factsHtml}${values(a.values)}${sub}</li>`;
 }
 
 /** One explanation (a binding, machine or let) as HTML. */
 export function explanationHtml(e) {
   const title = e.binding ?? e.machine ?? e.let;
   const kind = e.binding ? "binding" : e.machine ? "state machine" : "let";
+  const where = e.rule ?? e.file;
   const facts = [];
-  if (e.rule) facts.push(["rule", e.rule]);
-  if (e.file) facts.push(["file", e.file]);
-  if ("result" in e) facts.push(["result", e.result]);
-  if ("value" in e) facts.push(["value", e.value]);
-  if ("definition" in e) facts.push(["definition", e.definition]);
-  if ("changed" in e) facts.push(["changed", e.changed]);
-  if ("state" in e) facts.push(["state", e.state]);
-  if ("since" in e) facts.push(["since", e.since]);
-  if ("previous" in e) facts.push(["previous", e.previous]);
-  if ("device" in e) facts.push(["device", e.device]);
-  if ("device_matches" in e) facts.push(["device matches", e.device_matches]);
-  if ("last_written" in e) facts.push(["last written", e.last_written]);
-  if (e.stopped) facts.push(["stopped", e.stopped]);
+  if ("result" in e) facts.push(["result", `<strong>${value(e.result)}</strong>`]);
+  if ("value" in e) facts.push(["value", `<strong>${value(e.value)}</strong>`]);
+  if ("definition" in e) facts.push(["definition", `<code>${esc(e.definition)}</code>`]);
+  if ("changed" in e) facts.push(["changed", esc(e.changed)]);
+  if ("state" in e) facts.push(["state", `<strong>${esc(e.state)}</strong>`]);
+  if ("since" in e) facts.push(["since", esc(e.since)]);
+  if ("previous" in e) facts.push(["previous", esc(e.previous)]);
+  if ("device" in e) {
+    const match = e.device_matches;
+    const badge =
+      match === true
+        ? ` <span class="badge ok">matches</span>`
+        : match === false
+          ? ` <span class="badge warn">differs</span>`
+          : "";
+    facts.push(["device now", esc(e.device) + badge]);
+  }
+  if ("last_written" in e) facts.push(["last written", esc(e.last_written)]);
+  if (e.stopped) facts.push(["stopped", `<span class="error">${esc(e.stopped)}</span>`]);
   const arms = e.arms ?? e.latest;
+  const section = (label, html) => `<div class="section-label">${label}</div>${html}`;
+  let detail = "";
+  if (arms) {
+    const how = e.latest ? "the latest to happen wins" : "the first that holds wins";
+    detail = section(`Arms <span class="how">· ${how}</span>`, `<ul class="arms">${arms.map(arm).join("")}</ul>`);
+  } else if (e.values && Object.keys(e.values).length) {
+    detail = section("Values", values(e.values));
+  }
   return `<section class="expl">
-    <h3><code>${esc(title)}</code> <span class="kind">${kind}</span></h3>
-    ${e.summary ? `<p class="summary">${esc(e.summary)}</p>` : ""}
-    <table class="facts-table">${facts.map(([k, v]) => `<tr><th>${esc(k)}</th><td>${value(v)}</td></tr>`).join("")}</table>
-    ${arms ? `<ul class="arms">${arms.map(arm).join("")}</ul>` : values(e.values)}
+    <header><code class="name">${esc(title)}</code><span class="kind">${kind}</span>${where ? `<span class="where">${esc(where)}</span>` : ""}</header>
+    ${e.summary ? `<p class="summary">${prose(e.summary)}</p>` : ""}
+    <dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>
+    ${detail}
   </section>`;
 }
