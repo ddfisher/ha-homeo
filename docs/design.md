@@ -33,9 +33,9 @@ Non-goals for v1: replacing HA's UI automation editor; dashboards; arbitrary Pyt
 | Ships as a **custom integration**, installable via **HACS** (`hacs.json`) | **Decided** |
 | Watches `<config>/ha_dsl/*.hdsl` and recompiles on save | **Decided** |
 | The DSL has its own syntax, compiled inside HA at load time (not a Python library) | **Decided** |
-| Compile straight to an in-memory signal graph, not to Python source | **Proposed** |
-| Reloads are atomic: if a file has errors, keep the old rules running and report | **Proposed** |
-| The runtime persists every signal's value and change time that it depends on (plus state machines, last-written values, action bookkeeping) with HA's `Store` | **Proposed** |
+| Compile straight to an in-memory signal graph, not to Python source | **Decided** |
+| Reloads are atomic: if a file has errors, keep the old rules running and report | **Decided** |
+| The runtime persists every signal's value and change time that it depends on (plus state machines, last-written values, action bookkeeping) with HA's `Store` | **Open (in discussion)** |
 
 **Why compile to a graph rather than generate Python?** The compiler's output would only be
 runtime objects anyway (signals, bindings, timers, as in `spike/library/`). Building them
@@ -230,7 +230,7 @@ The same arm syntax is used by `latest` blocks (§10) and state machines (§13).
 
 ---
 
-## 9. Events as state: sources (D7, Proposed)
+## 9. Events as state: sources (D7, Decided)
 
 Each of these is a **timestamp signal**: its value is the time it last happened.
 
@@ -307,7 +307,7 @@ blinds_mode = latest
 - **Conditions must be bools or timestamps.** Anything else is a type error.
 - **Ties** (same occurrence time): the first arm wins.
 
-### Other history functions
+### Other history functions (Decided)
 
 | | Meaning |
 |---|---|
@@ -479,7 +479,7 @@ be set from the UI. A manual selection is an ordinary change: `age()` resets, `f
 relative to it, and `on` actions for the new value run. The entity also persists the machine's
 state across restarts (restore state).
 
-### Proposed details
+### Other details (Decided)
 
 - **Reload:** when a rules file is edited, the machine keeps its current state if that state
   still exists. Otherwise it resets to the initial state, with a log message.
@@ -566,7 +566,7 @@ doorbell press, TTS, `flash()`), so `on` would remain for those.
 **Decided:** `on x [if g]:` is the single effect construct. Whether to *also* add declarative
 notification targets, and in which version, is still open (D22).
 
-### Other details (Proposed)
+### Other details (Decided)
 
 - **Restart catch-up is automatic,** because "last handled" is persisted. Skip occurrences more
   than 1h old (configurable), since a notification six hours late is usually noise.
@@ -655,7 +655,7 @@ Known limits:
 
 ---
 
-## 17. Startup and restarts: D17 (Proposed)
+## 17. Startup and restarts: D17 (Decided)
 
 - Wait for HA's `started` event, then evaluate everything.
 - Write only where the result differs from the **persisted last-written value**. A restart is
@@ -666,7 +666,7 @@ Known limits:
 
 ---
 
-## 18. Abstraction: D18 (Open, can defer to v2)
+## 18. Abstraction: D18 (Decided: deferred to v2)
 
 Repeated patterns, like one fan rule per bathroom:
 
@@ -682,7 +682,7 @@ with no runtime cost. Leaving this out of v1 is fine.
 
 ---
 
-## 19. Errors, tooling, diagnostics (Proposed)
+## 19. Errors, tooling, diagnostics (Decided)
 
 - Compile errors appear as an HA **repairs issue / persistent notification**, with file, line,
   column and a caret snippet. Old rules keep running until the file compiles.
@@ -767,7 +767,7 @@ on humidity > 90% for 30min:
 | D4 | Units & literals | **Decided** | `5min`, `50%`, `22:00`, `sunset - 30min` |
 | D5 | Binding operator & targets | **Decided** (one writer, `keep`) / Open (operator, writers) | `=`, per-domain writers, `on(attr: …)`, `keep` |
 | D6 | Priority cascades | **Decided** | `cond -> value` arms, `\|` for guarded sub-arms, first match wins, `else` required in bindings |
-| D7 | Event sources | Proposed | timestamp signals; table in §9 |
+| D7 | Event sources | **Decided** | timestamp signals; table in §9 |
 | D8 | Event-type filter | **Decided** | `event.remote.double_press` |
 | D9 | Events | **Decided** | no event type: events are timestamp-valued state, as in HA |
 | D10 | Recency | **Decided** | `age(x)`: time since `x` last changed |
@@ -777,11 +777,12 @@ on humidity > 90% for 30min:
 | D13b | State machine semantics | **Decided** | arms are level-triggered conditions; chains with loop detection; restarts just re-evaluate |
 | D13c | Referring to states | **Decided** | string comparison, compile-time checked |
 | D13d | Visibility in HA | **Decided** | writable `select.ha_dsl_<name>` |
-| D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; catch-up capped at 1h (proposed) |
+| D13f | Reload & v2 deferrals | **Decided** | keep state across reloads if it still exists; nested states and extended state deferred to v2 |
+| D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; catch-up capped at 1h |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `age(manual(x)) < D -> keep` |
 | D16 | Unknown handling | **Decided** | Kleene logic, unknown → keep, change times skip dropouts |
-| D17 | Startup | Proposed | write only if different from persisted last value |
-| D18 | Abstraction | Open (v2) | compile-time templates |
+| D17 | Startup | **Decided** | write only if different from persisted last value |
+| D18 | Abstraction | **Decided: v2** | compile-time templates |
 | D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `cond -> value` arms |
 | D20 | "Since entering this state" | **Decided** | `fresh(x)`, only inside `state` blocks |
 | D21 | Manual-change detection | **Decided** | HA `Context` + differs from last write + not (un)availability; other automations count |
