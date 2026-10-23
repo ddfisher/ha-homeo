@@ -61,7 +61,7 @@ Non-goals for v1: replacing HA's UI automation editor; dashboards; arbitrary Pyt
 | v1 keeps no storage of its own: it relies on what HA itself restores, and treats anything older than a restart as "some time before the restart" (§17) | **Decided** |
 
 **Why compile to a graph rather than generate Python?** The compiler's output would only be
-runtime objects anyway (signals, bindings, timers, as in `spike/library/`). Building them
+runtime objects anyway (signals, bindings, timers). Building them
 directly means no code generation, no `exec`, and errors that carry the user's file and line
 numbers for free.
 
