@@ -358,7 +358,7 @@ async def test_editor_websocket_api(hass: HomeAssistant, setup_homeo, rules_dir,
 
     r = await ws({"type": "homeo/files"})
     assert r["success"]
-    assert r["result"]["files"] == [
+    assert [{k: f[k] for k in ("name", "loaded", "errors")} for f in r["result"]["files"]] == [
         {"name": "broken.homeo", "loaded": False, "errors": 1},
         {"name": "pump.homeo", "loaded": True, "errors": 0},
     ]
@@ -382,7 +382,7 @@ async def test_editor_websocket_api(hass: HomeAssistant, setup_homeo, rules_dir,
 
     # save: writes and reloads right away
     r = await ws({"type": "homeo/file/save", "name": "broken.homeo", "text": "let x = on\n"})
-    assert r["result"] == {"loaded": True, "diagnostics": []}
+    assert r["result"]["loaded"] is True and r["result"]["diagnostics"] == []
     assert (rules_dir / "broken.homeo").read_text() == "let x = on\n"
     assert "broken.homeo" in entry.runtime_data.programs
     r = await ws({"type": "homeo/file/save", "name": "pump.homeo", "text": "switch.pump := nope\n"})
@@ -434,3 +434,67 @@ async def test_panel_registered_with_the_frontend(hass: HomeAssistant, setup_hom
         await hass.async_block_till_done()
         assert static.call_count == 1
         assert reg.call_count == 2
+
+
+async def test_editor_file_names(hass: HomeAssistant, setup_homeo, rules_dir, hass_ws_client):
+    """Any file the integration loads can be edited; nothing outside the folder can."""
+    await setup_homeo({"küche.homeo": "let a = on\n", "living room.homeo": "let b = on\n"})
+    client = await hass_ws_client(hass)
+
+    async def ws(msg: dict) -> dict:
+        await client.send_json_auto_id(msg)
+        return await client.receive_json()
+
+    for name in ("küche.homeo", "living room.homeo"):
+        r = await ws({"type": "homeo/file/read", "name": name})
+        assert r["success"], r
+        r = await ws({"type": "homeo/file/save", "name": name, "text": "let c = off\n"})
+        assert r["success"] and r["result"]["loaded"], r
+    for bad in ("../x.homeo", "a/b.homeo", "a\\b.homeo", ".hidden.homeo", ".homeo", "x.txt"):
+        r = await ws({"type": "homeo/file/read", "name": bad})
+        assert not r["success"] and r["error"]["code"] == "invalid_format", bad
+
+
+async def test_editor_save_conflicts(hass: HomeAssistant, setup_homeo, rules_dir, hass_ws_client):
+    """A save based on an old version of the file is refused, unless forced."""
+    await setup_homeo({"a.homeo": "let a = on\n"})
+    client = await hass_ws_client(hass)
+
+    async def ws(msg: dict) -> dict:
+        await client.send_json_auto_id(msg)
+        return await client.receive_json()
+
+    version = (await ws({"type": "homeo/file/read", "name": "a.homeo"}))["result"]["version"]
+    (rules_dir / "a.homeo").write_text("let a = off  # edited elsewhere\n")
+    save = {"type": "homeo/file/save", "name": "a.homeo", "text": "let a = 1\n"}
+    r = await ws({**save, "version": version})
+    assert not r["success"] and r["error"]["code"] == "conflict"
+    assert "changed outside the editor" in r["error"]["message"]
+    assert "edited elsewhere" in (rules_dir / "a.homeo").read_text()
+
+    r = await ws({**save, "version": version, "force": True})
+    assert r["success"]
+    assert (rules_dir / "a.homeo").read_text() == "let a = 1\n"
+    r = await ws({**save, "text": "let a = 2\n", "version": r["result"]["version"]})
+    assert r["success"]  # based on the version just saved
+
+    # a "new" file that appeared on disk meanwhile
+    (rules_dir / "b.homeo").write_text("let b = on\n")
+    r = await ws({"type": "homeo/file/save", "name": "b.homeo", "text": "x", "version": None})
+    assert r["error"]["code"] == "conflict" and "created outside" in r["error"]["message"]
+
+
+async def test_editor_files_subscription(
+    hass: HomeAssistant, setup_homeo, rules_dir, hass_ws_client
+):
+    entry = await setup_homeo({"a.homeo": "let a = on\n"})
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({"type": "homeo/files/subscribe"})
+    assert (await client.receive_json())["success"]
+    first = await client.receive_json()
+    assert [f["name"] for f in first["event"]["files"]] == ["a.homeo"]
+
+    (rules_dir / "b.homeo").write_text("let b = on\n")
+    await entry.runtime_data.async_reload()  # what the watcher does
+    update = await client.receive_json()
+    assert [f["name"] for f in update["event"]["files"]] == ["a.homeo", "b.homeo"]

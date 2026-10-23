@@ -57,6 +57,8 @@ export function explanationHtml(e) {
   if (e.file) facts.push(["file", e.file]);
   if ("result" in e) facts.push(["result", e.result]);
   if ("value" in e) facts.push(["value", e.value]);
+  if ("definition" in e) facts.push(["definition", e.definition]);
+  if ("changed" in e) facts.push(["changed", e.changed]);
   if ("state" in e) facts.push(["state", e.state]);
   if ("since" in e) facts.push(["since", e.since]);
   if ("previous" in e) facts.push(["previous", e.previous]);

@@ -1,7 +1,22 @@
 // Autocompletion: entity ids (from the live HA states), their attributes and event types,
 // keywords, builtins, and the file's own `let` and `state` names.
 
+import { startCompletion } from "@codemirror/autocomplete";
+
 import { BUILTINS, FUNCTIONS, KEYWORDS } from "./language.js";
+
+/** Insert `domain.` and list that domain's entities straight away. */
+function applyDomain(domain) {
+  return (view, _completion, from, to) => {
+    const insert = `${domain}.`;
+    view.dispatch({
+      changes: { from, to, insert },
+      selection: { anchor: from + insert.length },
+      userEvent: "input.complete",
+    });
+    startCompletion(view);
+  };
+}
 
 const STATIC = [
   ...KEYWORDS.map((label) => ({ label, type: "keyword" })),
@@ -56,7 +71,7 @@ export function homeoCompletions(getHass) {
     const domains = [...new Set(Object.keys(states).map((id) => id.split(".")[0]))].map((d) => ({
       label: d,
       type: "namespace",
-      apply: `${d}.`,
+      apply: applyDomain(d),
       boost: -1,
     }));
     return {

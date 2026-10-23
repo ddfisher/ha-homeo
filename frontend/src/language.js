@@ -110,7 +110,7 @@ export const homeoHighlight = syntaxHighlighting(
     { tag: t.number, color: v("number", "#ca7841") },
     { tag: t.string, color: v("string", "#07a") },
     { tag: t.operator, color: v("operator", "#cda869") },
-    { tag: t.definition(t.variableName), color: v("def", "#8DA6CE") },
+    { tag: t.definition(t.variableName), color: v("def", "#2a5db0") },
     { tag: t.special(t.variableName), color: v("property", "#905") },
     { tag: t.definition(t.special(t.variableName)), color: v("property", "#905"), fontWeight: "bold" },
     { tag: t.function(t.standard(t.variableName)), color: v("qualifier", "#690") },

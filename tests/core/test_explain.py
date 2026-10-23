@@ -191,3 +191,44 @@ def test_explaining_changes_nothing():
         return r.new_calls()
 
     assert run(True) == run(False)
+
+
+def test_latest_with_groups_marks_the_deciding_sub_arm():
+    src = """
+light.desk := latest
+    binary_sensor.hall_motion
+        | sensor.lux < 50 -> on
+        | else -> off
+    input_button.boost -> off
+    else -> keep
+"""
+    r = Rig(src)
+    r.h.set_state("sensor.lux", "80")
+    r.h.advance(MIN)
+    r.h.set_state("binary_sensor.hall_motion", "on")
+    e = one(r, "light.desk")
+    assert e["result"] == "off"
+    group = e["latest"][0]
+    assert group["active"] is True
+    assert [a.get("active", False) for a in group["arms"]] == [False, True]
+    assert e["summary"] == (
+        "light.desk should be off, because `binary_sensor.hall_motion`, then `else` (line 5)"
+    )
+
+
+def test_let_parts():
+    src = """
+let co2   = sensor.bathroom_co2
+let night = now in 22:00..sunrise
+let day   = today in weekday
+fan.bathroom := co2 > 800 and not night and day
+"""
+    r = Rig(src)
+    r.h.advance(MIN)
+    r.h.set_state("sensor.bathroom_co2", "900")
+    r.h.advance(MIN)
+    co2 = one(r, "co2")
+    assert co2["value"] == 900 and co2["changed"] == "08:01:00 (1min ago)"
+    night = one(r, "night")
+    assert night["values"] == {"now": "08:02:00 (now)", "sunrise": "07:00:00 (1h2min ago)"}
+    assert one(r, "day")["values"] == {"today": "mon"}

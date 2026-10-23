@@ -359,12 +359,25 @@ ships `custom_components/homeo/`, so `frontend/` (source, tests, README) is bund
 into one committed module, `custom_components/homeo/frontend/homeo-panel.js` (~400 KB, 130 KB
 gzipped, nearly all CodeMirror); CI checks it matches the source. It talks to the integration
 over admin-only websocket commands (`websocket.py`): `homeo/files`, `homeo/file/read`,
-`homeo/file/check` (parse and check the text as that file, against the other running files,
-without loading), `homeo/file/save` (atomic write, then an immediate reload; a file with errors
-is saved and its previous version keeps running, as on any save), `homeo/file/delete` and
-`homeo/explain`. File names are plain names in the rules folder. Explain works on the statement
-under the cursor and explains the running version. Typing in the editor is kept from HA's
-global keyboard shortcuts, which don't recognise an editable area inside a shadow root.
+`homeo/files/subscribe`, `homeo/file/check` (parse and check the text as that file, against
+the other running files, without loading), `homeo/file/save` (atomic write, then an immediate
+reload; a file with errors is saved and its previous version keeps running, as on any save),
+`homeo/file/delete` and `homeo/explain`. Explain works on the statement
+under the cursor and explains the running version; while its pane is open it follows the
+cursor, and it stays open across files. Typing in the editor is kept from HA's global keyboard
+shortcuts, which don't recognise an editable area inside a shadow root.
+
+Edits are never lost silently (review of PR ddfisher/ha-homeo#4):
+- **Leaving the panel:** unsaved edits are kept in `sessionStorage` and restored when you come
+  back (HA rebuilds a custom panel on each visit); closing or reloading the tab asks first.
+- **Edits made elsewhere** (File editor or VS Code add-ons, Samba, `git pull`): files carry a
+  version (a hash of their text). `homeo/files/subscribe` sends the file list after every
+  reload, so an open file that changed on disk reloads itself if it has no unsaved edits, and
+  otherwise shows a notice ("Load the file from disk" / "Keep mine"). `homeo/file/save` takes
+  the version the edit started from and refuses with `conflict` if the file has changed since,
+  unless `force`.
+- **File names:** any file the integration loads can be edited (`küche.homeo`,
+  `living room.homeo`); only names that would leave the folder or are hidden are refused.
 
 ---
 
@@ -463,7 +476,7 @@ M5 as built:
 
 ### What has been verified, and what hasn't
 
-- 297 Python tests: 277 core (FakeHost, simulated clock), 20 integration
+- 302 Python tests: 279 core (FakeHost, simulated clock), 23 integration
   (`pytest-homeassistant-custom-component`). They pass on HA 2026.10.2 / Python 3.14 (the CI
   setup) and on HA 2026.2.3 / Python 3.13 (the minimum in `hacs.json`). The full suite passed
   100 consecutive runs after the watcher's shutdown races were fixed.
@@ -476,10 +489,12 @@ M5 as built:
   restart, the machine restored with its change time, `for` waiting its full time, and no action
   re-firing. It found one bug: service calls to domains without entities
   (`persistent_notification.create`) didn't compile.
-- **Editor panel:** 4 frontend unit tests (`npm test`), and a browser test
+- **Editor panel:** 5 frontend unit tests (`npm test`), and a browser test
   (`frontend/e2e/panel.mjs`, Playwright) against a real HA 2026.10.2 frontend: file list,
-  highlighting, typing without triggering HA's shortcuts, inline errors, entity completion,
-  Explain, save with Ctrl+S, and the phone layout, in light and dark themes.
+  highlighting, typing without triggering HA's shortcuts, inline errors, entity and domain
+  completion, Explain (following the cursor, across files, on `let`s), unsaved edits surviving
+  a visit to another page, a file changed on disk (reloaded, or a notice when edited), save,
+  and the phone layout, in light and dark themes.
 - **Not yet done:** running Homeo with real physical devices.
 
 ### Known limitations and open questions

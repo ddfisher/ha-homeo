@@ -19,12 +19,39 @@ import {
 import { homeoCompletions } from "./complete.js";
 import { diagnosticsToCodeMirror } from "./diagnostics.js";
 import { explanationHtml, statementTarget } from "./explain.js";
+import { validFileName } from "./files.js";
 import { homeoHighlight, homeoLanguage } from "./language.js";
 import { STYLES } from "./styles.js";
 
-const FILE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_-]*\.homeo$/;
 const LAST_FILE_KEY = "homeo-panel-last-file";
+const EXPLAIN_OPEN_KEY = "homeo-panel-explain-open";
+const DRAFT_KEY = "homeo-panel-draft"; // unsaved edits, kept while you visit other pages
 const NEW_FILE = "# Homeo rules: see the language guide in docs/design.md\n\n";
+
+function storage(kind) {
+  try {
+    return kind === "session" ? sessionStorage : localStorage;
+  } catch (_e) {
+    return null; // storage may be unavailable
+  }
+}
+
+function readStored(kind, key) {
+  try {
+    return JSON.parse(storage(kind)?.getItem(key) ?? "null");
+  } catch (_e) {
+    return null;
+  }
+}
+
+function writeStored(kind, key, value) {
+  try {
+    if (value === null) storage(kind)?.removeItem(key);
+    else storage(kind)?.setItem(key, JSON.stringify(value));
+  } catch (_e) {
+    // storage may be unavailable or full
+  }
+}
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -40,11 +67,35 @@ class HomeoPanel extends HTMLElement {
     this.current = null; // name of the open file
     this.saved = ""; // its text as last read or saved
     this.isNew = false; // not on disk yet
+    this.version = null; // version of the file on disk the edits started from
+    this.saving = false;
+    this.conflict = null; // {message, fromSave}: the file changed on disk under unsaved edits
     this.diagnostics = [];
     this.message = "";
     this.themeCompartment = new Compartment();
     this.view = null;
     this.checkSeq = 0;
+    this.explainOpen = !!readStored("local", EXPLAIN_OPEN_KEY);
+    this.explainedTarget = undefined;
+    this.explainSeq = 0;
+    this.unsubFiles = null;
+    this.onBeforeUnload = (e) => {
+      if (this.current && this.dirty) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+  }
+
+  connectedCallback() {
+    window.addEventListener("beforeunload", this.onBeforeUnload);
+    if (this._hass && !this.unsubFiles) this.subscribeFiles();
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener("beforeunload", this.onBeforeUnload);
+    this.unsubFiles?.then((unsub) => unsub()).catch(() => {});
+    this.unsubFiles = null;
   }
 
   // ------------------------------------------------------------ HA properties
@@ -116,21 +167,22 @@ class HomeoPanel extends HTMLElement {
     $(".save").addEventListener("click", () => this.save());
     $(".new").addEventListener("click", () => this.newFile());
     $(".delete").addEventListener("click", () => this.deleteFile());
-    $(".explain").addEventListener("click", () => this.explain());
-    $(".close").addEventListener("click", () => ($(".explanation").hidden = true));
+    $(".explain").addEventListener("click", () => this.setExplainOpen(true, true));
+    $(".close").addEventListener("click", () => this.setExplainOpen(false));
     $(".file-select").addEventListener("change", (e) => {
       const value = e.target.value;
       if (value === "__new__") this.newFile();
       else this.open(value);
     });
     this.createEditor();
+    this.subscribeFiles();
     this.refreshFiles().then(() => {
-      let last = null;
-      try {
-        last = localStorage.getItem(LAST_FILE_KEY);
-      } catch (_e) {
-        // storage may be unavailable
+      const draft = readStored("session", DRAFT_KEY);
+      if (draft?.name) {
+        this.restoreDraft(draft);
+        return;
       }
+      const last = readStored("local", LAST_FILE_KEY);
       const name = this.files.some((f) => f.name === last) ? last : this.files[0]?.name;
       if (name) this.open(name);
       else this.render();
@@ -205,10 +257,13 @@ class HomeoPanel extends HTMLElement {
           indentWithTab,
         ]),
         EditorView.updateListener.of((u) => {
-          if (u.docChanged && !u.transactions.some((tr) => tr.isUserEvent("homeo.load"))) {
+          const loading = u.transactions.some((tr) => tr.isUserEvent("homeo.load"));
+          if (u.docChanged && !loading) {
             this.message = ""; // a save's outcome no longer applies
+            this.saveDraft();
           }
           if (u.docChanged) this.renderDirty();
+          if ((u.selectionSet || u.docChanged) && this.explainOpen) this.followCursor();
         }),
       ],
     });
@@ -239,6 +294,65 @@ class HomeoPanel extends HTMLElement {
       this.message = `Couldn't list the rule files: ${err.message ?? err}`;
     }
     this.render();
+  }
+
+  /** The integration sends the file list again after every reload, including ones caused by
+   * edits made outside the panel. */
+  subscribeFiles() {
+    this.unsubFiles = this._hass.connection.subscribeMessage(
+      (event) => {
+        this.files = event.files;
+        this.directory = event.directory;
+        this.noticeOutsideChange();
+        this.render();
+      },
+      { type: "homeo/files/subscribe" },
+    );
+    this.unsubFiles.catch(() => {
+      this.unsubFiles = null;
+    });
+  }
+
+  /** The open file changed (or vanished) on disk, not through this panel. */
+  async noticeOutsideChange() {
+    if (!this.current || this.isNew || this.saving) return;
+    const onDisk = this.files.find((f) => f.name === this.current);
+    const diskVersion = onDisk?.version ?? null;
+    if (diskVersion === this.version) return;
+    if (!onDisk) {
+      this.isNew = true;
+      this.version = null;
+      this.message = `${this.current} was deleted outside the editor. Saving creates it again.`;
+      this.saveDraft();
+      this.render();
+      return;
+    }
+    if (!this.dirty) {
+      await this.reloadFromDisk(`Reloaded: ${this.current} was changed outside the editor.`);
+      return;
+    }
+    this.conflict = {
+      message: `${this.current} was changed outside the editor, and you have unsaved changes.`,
+      fromSave: false,
+    };
+    this.renderStatus();
+  }
+
+  async reloadFromDisk(message) {
+    const name = this.current;
+    let file;
+    try {
+      file = await this.ws({ type: "homeo/file/read", name });
+    } catch (err) {
+      this.message = `Couldn't read ${name}: ${err.message ?? err}`;
+      this.renderStatus();
+      return;
+    }
+    if (name !== this.current) return;
+    const head = this.view.state.selection.main.head;
+    this.load(name, file.text, false, file.version, Math.min(head, file.text.length));
+    this.message = message;
+    this.renderStatus();
   }
 
   async check(view) {
@@ -273,39 +387,81 @@ class HomeoPanel extends HTMLElement {
       this.render();
       return;
     }
-    let text;
+    let file;
     try {
-      text = (await this.ws({ type: "homeo/file/read", name })).text;
+      file = await this.ws({ type: "homeo/file/read", name });
     } catch (err) {
       this.message = `Couldn't open ${name}: ${err.message ?? err}`;
       this.render();
       return;
     }
-    this.load(name, text, false);
+    writeStored("session", DRAFT_KEY, null); // any unsaved edits were discarded above
+    this.load(name, file.text, false, file.version);
   }
 
-  load(name, text, isNew) {
+  load(name, text, isNew, version = null, cursor = 0) {
     this.current = name;
     this.saved = isNew ? "" : text;
     this.isNew = isNew;
+    this.version = version;
+    this.conflict = null;
     this.diagnostics = [];
     this.message = "";
     this.checkSeq++;
     this.view.dispatch({
       changes: { from: 0, to: this.view.state.doc.length, insert: text },
-      selection: { anchor: 0 },
+      selection: { anchor: cursor },
       scrollIntoView: true,
       userEvent: "homeo.load",
     });
     this.view.dispatch(setDiagnostics(this.view.state, []));
-    this.shadowRoot.querySelector(".explanation").hidden = true; // it was about another file
-    try {
-      localStorage.setItem(LAST_FILE_KEY, name);
-    } catch (_e) {
-      // storage may be unavailable
-    }
+    writeStored("local", LAST_FILE_KEY, name);
     this.render();
     this.view.focus();
+    if (this.explainOpen) this.explain(true); // the explanation was about another file
+  }
+
+  /** Back to the panel with unsaved edits from before (another page, or a reload). */
+  async restoreDraft(draft) {
+    const onDisk = this.files.find((f) => f.name === draft.name);
+    if (draft.isNew || !onDisk) {
+      this.load(draft.name, draft.text, true);
+    } else {
+      let file;
+      try {
+        file = await this.ws({ type: "homeo/file/read", name: draft.name });
+      } catch (_err) {
+        writeStored("session", DRAFT_KEY, null);
+        this.render();
+        return;
+      }
+      this.load(draft.name, file.text, false, draft.version);
+      if (file.text !== draft.text) {
+        this.view.dispatch({
+          changes: { from: 0, to: this.view.state.doc.length, insert: draft.text },
+          userEvent: "homeo.load",
+        });
+      }
+      if (file.version !== draft.version) {
+        this.conflict = {
+          message: `${draft.name} was changed outside the editor since you started editing it.`,
+          fromSave: false,
+        };
+      }
+    }
+    this.message = "Restored your unsaved changes.";
+    this.render();
+  }
+
+  saveDraft() {
+    if (!this.current) return;
+    writeStored(
+      "session",
+      DRAFT_KEY,
+      this.dirty
+        ? { name: this.current, text: this.view.state.doc.toString(), version: this.version, isNew: this.isNew }
+        : null,
+    );
   }
 
   newFile() {
@@ -320,8 +476,8 @@ class HomeoPanel extends HTMLElement {
     }
     name = name.trim();
     if (!name.endsWith(".homeo")) name += ".homeo";
-    if (!FILE_NAME.test(name)) {
-      alert("Use letters, digits, _ and - only, e.g. bathroom.homeo");
+    if (!validFileName(name)) {
+      alert("A file name can't contain / or \\ or start with a dot, e.g. bathroom.homeo");
       this.render();
       return;
     }
@@ -332,23 +488,34 @@ class HomeoPanel extends HTMLElement {
     this.load(name, NEW_FILE, true);
   }
 
-  async save() {
-    if (!this.current || !this.dirty) return;
+  async save(force = false) {
+    if (!this.current || (!this.dirty && !force)) return;
     const text = this.view.state.doc.toString();
     const name = this.current;
     this.message = "Saving…";
+    this.conflict = null;
     this.renderStatus();
     let result;
+    this.saving = true;
     try {
-      result = await this.ws({ type: "homeo/file/save", name, text });
+      result = await this.ws({ type: "homeo/file/save", name, text, version: this.version, force });
     } catch (err) {
-      this.message = `Couldn't save: ${err.message ?? err}`;
+      if (err.code === "conflict") {
+        this.message = "";
+        this.conflict = { message: `Not saved: ${err.message}.`, fromSave: true };
+      } else {
+        this.message = `Couldn't save: ${err.message ?? err}`;
+      }
       this.renderStatus();
       return;
+    } finally {
+      this.saving = false;
     }
     if (name !== this.current) return;
     this.saved = text;
     this.isNew = false;
+    this.version = result.version;
+    writeStored("session", DRAFT_KEY, null);
     this.diagnostics = result.diagnostics;
     this.message = result.loaded
       ? "Saved and running."
@@ -359,6 +526,7 @@ class HomeoPanel extends HTMLElement {
       );
     }
     await this.refreshFiles();
+    if (this.explainOpen) this.explain(true); // the running version changed
   }
 
   async deleteFile() {
@@ -377,34 +545,58 @@ class HomeoPanel extends HTMLElement {
     this.current = null;
     this.isNew = false;
     this.saved = "";
-    this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: "" } });
+    this.version = null;
+    this.conflict = null;
+    writeStored("session", DRAFT_KEY, null);
+    this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: "" }, userEvent: "homeo.load" });
     await this.refreshFiles();
     if (this.files.length) this.open(this.files[0].name);
   }
 
   // --------------------------------------------------------------- explain
 
-  async explain() {
-    const aside = this.shadowRoot.querySelector(".explanation");
-    const body = this.shadowRoot.querySelector(".explanation-body");
-    aside.hidden = false;
+  setExplainOpen(open, refresh = false) {
+    this.explainOpen = open;
+    writeStored("local", EXPLAIN_OPEN_KEY, open);
+    this.shadowRoot.querySelector(".explanation").hidden = !open;
+    if (open) this.explain(refresh);
+  }
+
+  /** While the pane is open, explain whatever statement the cursor moves to. */
+  followCursor() {
+    clearTimeout(this.followTimer);
+    this.followTimer = setTimeout(() => this.explain(false), 250);
+  }
+
+  cursorTarget() {
     const state = this.view.state;
     const line = state.doc.lineAt(state.selection.main.head).number;
-    const target = statementTarget(state.doc.toString(), line);
+    return statementTarget(state.doc.toString(), line);
+  }
+
+  async explain(force) {
+    const body = this.shadowRoot.querySelector(".explanation-body");
+    this.shadowRoot.querySelector(".explanation").hidden = false;
+    const target = this.current ? this.cursorTarget() : null;
+    if (!force && target === this.explainedTarget) return;
+    this.explainedTarget = target;
+    const seq = ++this.explainSeq;
     if (!target) {
-      body.innerHTML = `<p class="hint">Put the cursor on a binding (<code>x := …</code>), a <code>state</code> or a <code>let</code>, then press Explain.</p>`;
+      body.innerHTML = `<p class="hint">Put the cursor on a binding (<code>x := …</code>), a <code>state</code> or a <code>let</code> to see why it has its value.</p>`;
       return;
     }
-    body.innerHTML = `<p class="hint">Explaining <code>${escapeHtml(target)}</code>…</p>`;
+    let html;
     try {
       const result = await this.ws({ type: "homeo/explain", target });
       const note = this.dirty
         ? `<p class="hint">This explains the running version of the file, without your unsaved changes.</p>`
         : "";
-      body.innerHTML = note + result.explanations.map(explanationHtml).join("");
+      html = note + result.explanations.map(explanationHtml).join("");
     } catch (err) {
-      body.innerHTML = `<p class="error">${escapeHtml(err.message ?? err)}</p>`;
+      html = `<p class="error">${escapeHtml(err.message ?? err)}</p>`;
+      if (this.dirty || this.isNew) html += `<p class="hint">Save the file to explain your changes.</p>`;
     }
+    if (seq === this.explainSeq) body.innerHTML = html;
   }
 
   // ---------------------------------------------------------------- render
@@ -437,6 +629,7 @@ class HomeoPanel extends HTMLElement {
         )
         .join("") + `<option value="__new__">New file…</option>`;
     $(".file-name").textContent = this.current ?? "";
+    $(".explanation").hidden = !this.explainOpen;
     $(".delete").hidden = !this.current;
     this.shadowRoot.querySelector(".editor").classList.toggle("empty", !this.current);
     if (!this.current && !this.message) {
@@ -474,7 +667,31 @@ class HomeoPanel extends HTMLElement {
           ? `${warnings.length} warning${warnings.length > 1 ? "s" : ""}`
           : "No problems";
     }
-    el.innerHTML = `<div class="summary">${escapeHtml(summary)}</div>${items ? `<ul>${items}</ul>` : ""}`;
+    const conflict = this.conflict
+      ? `<div class="conflict"><span>${escapeHtml(this.conflict.message)}</span>
+          <button class="load-disk">Load the file from disk</button>
+          <button class="keep-mine">${this.conflict.fromSave ? "Overwrite it with mine" : "Keep mine"}</button></div>`
+      : "";
+    el.innerHTML = `${conflict}<div class="summary">${escapeHtml(summary)}</div>${items ? `<ul>${items}</ul>` : ""}`;
+    el.querySelector(".load-disk")?.addEventListener("click", () => {
+      if (confirm("Discard your unsaved changes and load the file from disk?")) {
+        writeStored("session", DRAFT_KEY, null);
+        this.reloadFromDisk("Loaded the version on disk.");
+      }
+    });
+    el.querySelector(".keep-mine")?.addEventListener("click", () => {
+      const fromSave = this.conflict.fromSave;
+      this.conflict = null;
+      if (fromSave) {
+        this.save(true);
+      } else {
+        // Saving will replace the version on disk: take it as the base.
+        this.version = this.files.find((f) => f.name === this.current)?.version ?? null;
+        this.isNew = this.version === null;
+        this.saveDraft();
+        this.renderStatus();
+      }
+    });
     for (const li of el.querySelectorAll("li")) {
       li.addEventListener("click", () => {
         const d = this.diagnostics[Number(li.dataset.i)];

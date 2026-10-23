@@ -6,6 +6,7 @@ import { Text } from "@codemirror/state";
 
 import { diagnosticsToCodeMirror } from "../src/diagnostics.js";
 import { statementTarget } from "../src/explain.js";
+import { validFileName } from "../src/files.js";
 import { homeoStream } from "../src/language.js";
 
 /** [text, style] pairs for one line (non-blank tokens only). */
@@ -110,4 +111,13 @@ test("diagnostics map to document offsets", () => {
   ]);
   assert.equal(e.severity, "warning");
   assert.ok(e.from <= doc.length && e.to <= doc.length);
+});
+
+test("file names: anything the integration loads, nothing outside the folder", () => {
+  for (const ok of ["bathroom.homeo", "küche.homeo", "living room.homeo", "bath.v2.homeo"]) {
+    assert.ok(validFileName(ok), ok);
+  }
+  for (const bad of ["../x.homeo", "a/b.homeo", "a\\b.homeo", ".hidden.homeo", ".homeo", "x.txt", "a\0.homeo"]) {
+    assert.ok(!validFileName(bad), bad);
+  }
 });

@@ -130,6 +130,13 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   background: var(--card-background-color);
   font-size: 13px;
 }
+.status .conflict {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: rgba(var(--rgb-warning-color, 255, 166, 0), 0.15);
+  border-bottom: 1px solid var(--divider-color);
+}
+.status .conflict span { flex: 1 1 260px; }
 .status .summary { padding: 6px 12px; color: var(--secondary-text-color); }
 .status ul { list-style: none; margin: 0; padding: 0 0 6px; }
 .status li { padding: 3px 12px; cursor: pointer; }

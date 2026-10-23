@@ -190,7 +190,7 @@ rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts ar
 | I19 | Error format | `file:line:col: error: …`, caret snippet, optional `hint:` |
 | I20 | Dry run | `# mode: dry_run` directive or an integration option; logs would-be calls |
 | I21 | `homeo.explain` | A service with a response; target = binding target, entity, machine or `let` name; per arm: condition value, subexpression values (sugar expanded, `let` names kept), active arm; plus summary, device state, last write |
-| I22 | Editor panel | CodeMirror 6, bundled into one committed module (HACS ships only `custom_components/homeo/`); admin-only websocket API (`homeo/files`, `file/read`, `file/check`, `file/save`, `file/delete`, `explain`); errors checked as you type against the other running files; save reloads at once; Explain for the rule under the cursor |
+| I22 | Editor panel | CodeMirror 6, bundled into one committed module (HACS ships only `custom_components/homeo/`); admin-only websocket API (`homeo/files`, `files/subscribe`, `file/read`, `file/check`, `file/save`, `file/delete`, `explain`); errors checked as you type against the other running files; save reloads at once; Explain follows the cursor; unsaved edits kept across pages; saves refuse to overwrite edits made elsewhere |
 
 ### Repository state
 

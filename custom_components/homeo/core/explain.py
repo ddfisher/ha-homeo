@@ -18,6 +18,7 @@ from . import ir
 from .errors import did_you_mean
 from .printer import fmt_duration
 from .runtime import NOTHING, RSink, Runtime, to_bool
+from .timeutil import last_occurrence
 from .types import T
 from .values import KEEP, UNKNOWN, DailyTime, Days, Num, OnSpec
 
@@ -41,6 +42,7 @@ class _Explainer:
         self.tz = rt.host.tz
         self.labels: dict[int, str] = {}
         self.binding_ctx: ir.BindingDef | None = None  # formats arm results like the binding's
+        self.reason: str | None = None  # why the last traced block's chosen arm applies
         for program in rt.programs.values():
             for name, node in program.lets.items():
                 self.labels.setdefault(id(node), name)
@@ -131,9 +133,9 @@ class _Explainer:
         nxt = self.eval(chosen.result) if isinstance(chosen, ir.ArmIR) else None
         summary = f'{d.name} is "{m.value}" since {self.fmt_time(m.ct)}'
         if isinstance(chosen, ir.ArmIR) and nxt == m.value:
-            summary += f"; `{self.cond_text(chosen)}` keeps it there"
+            summary += f"; it stays there because {self.reason}"
         elif isinstance(chosen, ir.ArmIR) and isinstance(nxt, str):
-            summary += f'; about to change to "{nxt}" (`{self.cond_text(chosen)}`)'
+            summary += f'; about to change to "{nxt}", because {self.reason}'
         else:
             summary += "; no arm applies now"
         out["summary"] = summary
@@ -149,6 +151,8 @@ class _Explainer:
         }
         if not isinstance(node, (ir.Cascade, ir.Latest)):
             out["definition"] = node.text
+        if isinstance(node, ir.Read) and (rc := self.rt.cells.get(node.cell.key)) is not None:
+            out["changed"] = self.fmt_since(rc.ct)  # an alias: when the entity last changed
         trace, _ = self.body(node)
         out.update(trace)
         return out
@@ -161,20 +165,12 @@ class _Explainer:
         if isinstance(n, ir.Latest):
             trace, chosen = self.arms_trace(n.arms, cascade=False)
             return {"latest": trace}, chosen
+        self.reason = None
         values = self.values(n, include_self=False)
         return ({"values": values} if values else {}), None
 
     def binding_summary(self, b: ir.BindingDef, result: Any, chosen: Any) -> str:
-        why = ""
-        if isinstance(chosen, ir.ArmIR):
-            line = chosen.span.line
-            why = (
-                f", because no other arm applies (`else`, line {line})"
-                if chosen.cond is None
-                else f", because `{self.cond_text(chosen)}` (line {line})"
-            )
-        elif isinstance(chosen, ir.GroupIR):
-            why = f", because `{chosen.source}` (line {chosen.span.line})"
+        why = f", because {self.reason}" if self.reason and chosen is not None else ""
         if result is UNKNOWN:
             return (
                 f"{b.key} is left as it is: the result is unknown "
@@ -218,7 +214,31 @@ class _Explainer:
             chosen = self.first_match(arms)
         else:
             chosen, _ = self.rt.latest_choice(arms)
+            if isinstance(chosen, ir.GroupIR):  # the winning group's sub-arm decides
+                chosen = self.first_match(chosen.arms)
+        self.reason = self.reason_for(arms, chosen)
         return [self.arm(a, chosen, cascade) for a in arms], chosen
+
+    def reason_for(self, arms: list[ir.ArmIR | ir.GroupIR], chosen: Any) -> str | None:
+        """Why `chosen` applies: its enclosing guards, then its condition, and its line."""
+        if not isinstance(chosen, ir.ArmIR):
+            return None
+        guards = self.guards_to(arms, chosen) or []
+        if not guards and chosen.cond is None:
+            return f"no other arm applies (`else`, line {chosen.span.line})"
+        steps = [f"`{g.source or g.text}`" for g in guards] + [f"`{self.cond_text(chosen)}`"]
+        return f"{', then '.join(steps)} (line {chosen.span.line})"
+
+    def guards_to(self, arms: list[ir.ArmIR | ir.GroupIR], target: Any) -> list[ir.GroupIR] | None:
+        """The groups enclosing `target`, outermost first; None if it isn't in `arms`."""
+        for a in arms:
+            if a is target:
+                return []
+            if isinstance(a, ir.GroupIR):
+                inner = self.guards_to(a.arms, target)
+                if inner is not None:
+                    return [a, *inner]
+        return None
 
     def first_match(self, arms: list[ir.ArmIR | ir.GroupIR]) -> Any:
         """The arm a cascade takes, as `Runtime._eval_arms` does (a sub-arm for groups)."""
@@ -303,6 +323,15 @@ class _Explainer:
                 self._visit_cell(c, False, out, seen)
             case ir.Age(cell=c) | ir.Previous(cell=c) | ir.Available(cell=c) | ir.Fresh(cell=c):
                 self._visit_cell(c, True, out, seen)
+            case ir.InTimeRange(start=start, end=end):
+                # its parts: the time now, and when each bound last happened (solar ones move)
+                out.setdefault("now", self.instant(self.rt.now))
+                for bound in (start, end):
+                    if bound.solar is not None:
+                        out.setdefault(repr(bound), self.last_time(bound))
+            case ir.DayIn():
+                weekday = datetime.fromtimestamp(self.rt.now, self.tz).strftime("%a").lower()
+                out.setdefault("today", weekday)
         for ch in ir.children(n):
             self._visit(ch, True, out, seen)
 
@@ -409,6 +438,18 @@ class _Explainer:
         if lo == -math.inf:
             return f"never, or at or before {self.instant(hi)}"
         return f"between {self.instant(lo)} and {self.instant(hi)}"
+
+    def last_time(self, daily: DailyTime) -> str:
+        if daily.solar is not None and not self.rt.sun.available:
+            return "unknown (sun.sun is unavailable)"
+        t = last_occurrence(daily, self.rt.now, self.tz, self.rt.sun.occurrence)
+        return "never" if t is None else self.instant(t)
+
+    def fmt_since(self, ct: Num) -> str:
+        """A change time: exact, or only known to be before some time (e.g. the restart)."""
+        if ct.lo == ct.hi:
+            return self.instant(ct.lo)
+        return f"some time before {self.instant(ct.hi)}"
 
     def instant(self, t: float) -> str:
         now = self.rt.now

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from collections.abc import Callable, Mapping
@@ -17,6 +18,7 @@ from homeassistant.core import Event, HomeAssistant, ServiceCall, ServiceRespons
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.start import async_at_started
 
@@ -29,6 +31,7 @@ from .const import (
     ISSUE_PREFIX,
     RULES_DIR,
     RULES_SUFFIX,
+    SIGNAL_FILES_CHANGED,
 )
 from .core.checker import Globals, check
 from .core.errors import CompileError, Diagnostic
@@ -79,6 +82,13 @@ def _write_text(path: Path, text: str) -> None:
 def _delete(path: Path) -> None:
     """Runs in the executor."""
     path.unlink(missing_ok=True)
+
+
+def file_version(text: str | None) -> str | None:
+    """A short hash of a file's text, so the editor can tell when it changed elsewhere."""
+    if text is None:
+        return None
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 def issue_id(file: str) -> str:
@@ -203,6 +213,8 @@ class HomeoManager:
             files = await self.hass.async_add_executor_job(_read_rule_files, self.directory)
             self.files = files
             self.apply(self.compile_all(files))
+        # The editor panel refreshes its file list (and notices edits made elsewhere).
+        async_dispatcher_send(self.hass, SIGNAL_FILES_CHANGED)
 
     def compile_all(self, files: dict[str, RuleFile]) -> dict[str, Program]:
         g = Globals()
@@ -297,8 +309,9 @@ class HomeoManager:
                 "name": name,
                 "loaded": name in self.programs,
                 "errors": len(self.errors.get(name, [])),
+                "version": file_version(f.text),
             }
-            for name in sorted(files)
+            for name, f in sorted(files.items())
         ]
 
     async def async_read_file(self, name: str) -> str | None:

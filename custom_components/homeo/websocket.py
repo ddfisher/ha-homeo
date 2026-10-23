@@ -5,28 +5,35 @@ All commands need an admin user: rule files drive devices.
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from .const import DOMAIN, RULES_SUFFIX
+from .const import DOMAIN, RULES_SUFFIX, SIGNAL_FILES_CHANGED
 from .core.errors import Diagnostic
 from .core.explain import NotFound, explain
+from .manager import file_version
 
 if TYPE_CHECKING:
     from .manager import HomeoManager
 
 _REGISTERED = f"{DOMAIN}_websocket_registered"
-# A plain file name in the rules directory: no paths, no hidden files.
-FILE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]*" + re.escape(RULES_SUFFIX) + "$")
 
 
 def _file_name(value: Any) -> str:
-    if not isinstance(value, str) or not FILE_NAME.match(value):
-        raise vol.Invalid(f"a file name like `bathroom{RULES_SUFFIX}` (letters, digits, _ and -)")
+    """Any name the integration loads (`<config>/homeo/*.homeo`, so `küche.homeo` or
+    `living room.homeo` too), as long as it stays in that folder and isn't hidden."""
+    if (
+        not isinstance(value, str)
+        or not value.endswith(RULES_SUFFIX)
+        or value == RULES_SUFFIX
+        or value.startswith(".")
+        or any(c in value for c in "/\\\0")
+    ):
+        raise vol.Invalid(f"a file name in the rules folder, like `bathroom{RULES_SUFFIX}`")
     return value
 
 
@@ -36,7 +43,15 @@ def async_register(hass: HomeAssistant) -> None:
     if hass.data.get(_REGISTERED):
         return
     hass.data[_REGISTERED] = True
-    for command in (ws_files, ws_read, ws_check, ws_save, ws_delete, ws_explain):
+    for command in (
+        ws_files,
+        ws_subscribe_files,
+        ws_read,
+        ws_check,
+        ws_save,
+        ws_delete,
+        ws_explain,
+    ):
         websocket_api.async_register_command(hass, command)
 
 
@@ -71,6 +86,34 @@ async def ws_files(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) ->
     connection.send_result(msg["id"], {"files": files, "directory": str(manager.directory)})
 
 
+@websocket_api.websocket_command({vol.Required("type"): "homeo/files/subscribe"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_subscribe_files(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
+    """Like homeo/files, sent now and again after every reload (a save here or elsewhere, or
+    a change the file watcher saw), so the panel stays current and notices outside edits."""
+    if (manager := _manager(hass, connection, msg)) is None:
+        return
+
+    async def send() -> None:
+        files = await manager.async_list_files()
+        connection.send_message(
+            websocket_api.event_message(
+                msg["id"], {"files": files, "directory": str(manager.directory)}
+            )
+        )
+
+    @callback
+    def changed() -> None:
+        hass.async_create_task(send(), "homeo files changed")
+
+    connection.subscriptions[msg["id"]] = async_dispatcher_connect(
+        hass, SIGNAL_FILES_CHANGED, changed
+    )
+    connection.send_result(msg["id"])
+    await send()
+
+
 @websocket_api.websocket_command(
     {vol.Required("type"): "homeo/file/read", vol.Required("name"): _file_name}
 )
@@ -83,7 +126,9 @@ async def ws_read(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> 
     if text is None:
         connection.send_error(msg["id"], "not_found", f"{msg['name']} doesn't exist")
         return
-    connection.send_result(msg["id"], {"name": msg["name"], "text": text})
+    connection.send_result(
+        msg["id"], {"name": msg["name"], "text": text, "version": file_version(text)}
+    )
 
 
 @websocket_api.websocket_command(
@@ -108,6 +153,10 @@ def ws_check(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
         vol.Required("type"): "homeo/file/save",
         vol.Required("name"): _file_name,
         vol.Required("text"): str,
+        # The version the edit started from (None: a new file). If the file has changed since
+        # (another editor, a git pull), the save is refused with `conflict` unless `force`.
+        vol.Optional("version"): vol.Any(str, None),
+        vol.Optional("force", default=False): bool,
     }
 )
 @websocket_api.require_admin
@@ -117,13 +166,23 @@ async def ws_save(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> 
     running (§2), and the result says so."""
     if (manager := _manager(hass, connection, msg)) is None:
         return
-    await manager.async_save_file(msg["name"], msg["text"])
-    errors = manager.errors.get(msg["name"], [])
+    name = msg["name"]
+    if "version" in msg and not msg["force"]:
+        current = file_version(await manager.async_read_file(name))
+        if current != msg["version"]:
+            what = "was deleted" if current is None else "was changed outside the editor"
+            if msg["version"] is None and current is not None:
+                what = "was created outside the editor"
+            connection.send_error(msg["id"], "conflict", f"{name} {what} since you opened it")
+            return
+    await manager.async_save_file(name, msg["text"])
+    errors = manager.errors.get(name, [])
     connection.send_result(
         msg["id"],
         {
-            "loaded": msg["name"] in manager.programs and not errors,
+            "loaded": name in manager.programs and not errors,
             "diagnostics": [diagnostic_json(d) for d in errors],
+            "version": file_version(msg["text"]),
         },
     )
 

@@ -316,7 +316,7 @@ async def serve(config: Path) -> None:
         "hassUrl": "http://127.0.0.1:8123",
         "clientId": client_id,
     }
-    (config / "token.json").write_text(json.dumps(token))
+    await hass.async_add_executor_job((config / "token.json").write_text, json.dumps(token))
     log("ready on http://127.0.0.1:8123 (token in token.json)")
     await asyncio.Event().wait()
 

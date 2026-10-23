@@ -10,3 +10,4 @@ EVENT_RULE_FIRED = "homeo_rule_fired"
 CONF_DRY_RUN = "dry_run"
 MACHINE_UNIQUE_ID_PREFIX = "homeo_state_"
 ISSUE_PREFIX = "compile_error_"
+SIGNAL_FILES_CHANGED = "homeo_files_changed"  # dispatcher signal after each reload

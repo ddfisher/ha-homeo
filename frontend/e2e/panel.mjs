@@ -75,6 +75,18 @@ try {
   check("highlighting", (await panel.locator(".cm-content span").count()) > 30);
   await shot("panel");
 
+  const editorText = () => panel.locator(".cm-content").innerText();
+  const explanation = () => panel.locator(".explanation-body").innerText();
+  const until = async (what, predicate, timeout = 8000) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if (await predicate()) return true;
+      await page.waitForTimeout(100);
+    }
+    check(what, false, "timed out");
+    return false;
+  };
+
   // Typing must not trigger HA's keyboard shortcuts (`e`, `c`, `a`, `m` open dialogs).
   await panel.locator(".cm-content").click();
   await page.keyboard.press("Control+End");
@@ -89,31 +101,66 @@ try {
 
   await page.keyboard.type("light.bed");
   await panel.locator(".cm-tooltip-autocomplete").waitFor({ timeout: 5000 });
-  const options = await panel.locator(".cm-tooltip-autocomplete li").allTextContents();
+  let options = await panel.locator(".cm-tooltip-autocomplete li").allTextContents();
   check("entity completion", options.some((o) => o.includes("light.bed_light")), options.join());
   await page.keyboard.press("Escape");
 
-  // explain the fan's rule (the running version)
+  // completing a domain inserts `domain.` and lists its entities right away
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("input_butt");
+  await panel.locator(".cm-tooltip-autocomplete li", { hasText: "input_button" }).first().waitFor({ timeout: 5000 });
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(400);
+  options = await panel.locator(".cm-tooltip-autocomplete li").allTextContents();
+  check("domain completion continues", options.some((o) => o.includes("input_button.boost")), options.join());
+  await shot("panel-complete");
+  await page.keyboard.press("Escape");
+
+  // Explain the fan's rule (the running version), then follow the cursor
   await panel.locator(".cm-line", { hasText: "fan.ceiling_fan :=" }).click();
   await panel.locator("button.explain").click();
-  await panel.locator(".explanation-body section").waitFor({ timeout: 5000 });
-  const expl = await panel.locator(".explanation-body").innerText();
-  check("explain", expl.includes("fan.ceiling_fan should be"), expl.slice(0, 200));
-  check("explain notes unsaved changes", expl.includes("without your unsaved changes"));
+  await until("explain", async () => (await explanation()).includes("fan.ceiling_fan should be"));
+  check("explain notes unsaved changes", (await explanation()).includes("without your unsaved changes"));
   await shot("panel-explain");
+  await panel.locator(".cm-line", { hasText: "kelvin: 2700" }).click();
+  await until("explain follows the cursor", async () => (await explanation()).includes("light.bed_light should be"));
+  await panel.locator(".cm-line", { hasText: "let night" }).click();
+  await until("explain a let", async () => /night\s*let/.test(await explanation()));
+  const nightText = await explanation();
+  check("let parts", nightText.includes("now") && nightText.includes("definition"), nightText.slice(0, 300));
 
-  // switch files, discarding the edits; then edit and save with Ctrl+S
+  // unsaved edits survive visiting another page
+  await page.locator("ha-sidebar").getByText("Overview").click();
+  await page.waitForURL(/lovelace|dashboard/, { timeout: 10000 }).catch(() => {});
+  await page.locator("ha-sidebar").getByText("Homeo").click();
+  await until("draft restored", async () => (await editorText()).includes("sensor.outside_temperatur"));
+  check("restore message", (await panel.locator(".status").innerText()).includes("Restored your unsaved changes"));
+  check("explanation still open", await panel.locator(".explanation").isVisible());
+
+  // switch files, discarding the edits; the explanation stays open and follows
   page.once("dialog", (d) => d.accept());
   await panel.locator("nav.files li", { hasText: "garage.homeo" }).click();
   await panel.locator(".cm-content").filter({ hasText: "switch.ac" }).waitFor({ timeout: 5000 });
-  check("explanation closed on switching files", await panel.locator(".explanation").isHidden());
+  await until("explanation follows to the new file", async () => (await explanation()).includes("switch.ac"));
+
+  // an unedited file changed on disk reloads itself
+  writeFileSync(garagePath, `${garageBefore}# edited elsewhere 1\n`);
+  await until("outside change reloads", async () => (await editorText()).includes("edited elsewhere 1"));
+
+  // with unsaved edits, it shows a notice; "Keep mine" then saves over it
   await panel.locator(".cm-content").click();
   await page.keyboard.press("Control+End");
   await page.keyboard.type("# saved from the browser test\n");
-  await page.keyboard.press("Control+s");
+  writeFileSync(garagePath, `${garageBefore}# edited elsewhere 2\n`);
+  await until("conflict notice", async () => (await panel.locator(".status .conflict").count()) > 0);
+  await shot("panel-conflict");
+  check("edits kept", (await editorText()).includes("saved from the browser test"));
+  await panel.locator(".status .keep-mine").click();
+  await panel.locator("button.save").click();
   await panel.locator(".status").filter({ hasText: "Saved" }).waitFor({ timeout: 5000 });
   check("saved and running", (await panel.locator(".status").innerText()).includes("Saved and running"));
-  check("written to disk", readFileSync(garagePath, "utf8").includes("# saved from the browser test"));
+  const disk = readFileSync(garagePath, "utf8");
+  check("written to disk", disk.includes("# saved from the browser test") && !disk.includes("edited elsewhere 2"), disk);
 
   await page.setViewportSize({ width: 390, height: 800 });
   await page.waitForTimeout(500);

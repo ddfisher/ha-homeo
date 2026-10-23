@@ -19,9 +19,9 @@ CI checks that the committed bundle matches the source.
 - `src/homeo-panel.js`: the `<homeo-panel>` element HA loads (it receives `hass` and `narrow`).
 - `src/language.js`: the highlighter (a CodeMirror stream parser mirroring `core/lexer.py`),
   coloured with HA's own code editor theme variables.
-- `src/complete.js`, `src/explain.js`, `src/diagnostics.js`, `src/styles.js`: completion, the
-  Explain pane, error positions, styles.
+- `src/complete.js`, `src/explain.js`, `src/diagnostics.js`, `src/files.js`, `src/styles.js`:
+  completion, the Explain pane, error positions, file names, styles.
 
 The panel talks to the integration over websocket commands defined in
-`custom_components/homeo/websocket.py` (`homeo/files`, `homeo/file/read`, `homeo/file/check`,
-`homeo/file/save`, `homeo/file/delete`, `homeo/explain`).
+`custom_components/homeo/websocket.py` (`homeo/files`, `homeo/files/subscribe`,
+`homeo/file/read`, `homeo/file/check`, `homeo/file/save`, `homeo/file/delete`, `homeo/explain`).
