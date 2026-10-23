@@ -430,8 +430,17 @@ M5 as built:
   (`pytest-homeassistant-custom-component`). They pass on HA 2026.10.2 / Python 3.14 (the CI
   setup) and on HA 2026.2.3 / Python 3.13 (the minimum in `hacs.json`). The full suite passed
   100 consecutive runs after the watcher's shutdown races were fixed.
-- **Not yet done:** running Homeo in a real Home Assistant instance with real devices; running
-  `hassfest` and the HACS validation. Do these before a first release.
+- **Real Home Assistant (session 2):** `tools/real_ha.py` boots a full HA 2026.10.2 (real
+  bootstrap and loader, the demo integration's devices, restore state, the real file watcher)
+  and checks, in real time: initial sync, every kind of writer against devices that behave like
+  real ones (a slow cover isn't re-commanded mid-travel), a manual change and its timed
+  override, a boost expiring, a state machine set from its `select` entity, actions on a machine
+  and on an event entity, a broken edit raising and clearing a Repairs issue, and, after a
+  restart, the machine restored with its change time, `for` waiting its full time, and no action
+  re-firing. It found one bug: service calls to domains without entities
+  (`persistent_notification.create`) didn't compile.
+- **Not yet done:** running Homeo with real physical devices; running `hassfest` and the HACS
+  validation.
 
 ### Known limitations and open questions
 
@@ -464,7 +473,8 @@ M5 as built:
 
 ### Next steps, in order
 
-1. Try it in a real HA instance with a few real rules; fix what that turns up.
+1. ~~Try it in a real HA instance~~ (done with the demo devices; `tools/real_ha.py`). Trying
+   it with real physical devices is still worthwhile.
 2. Add `hassfest` and the HACS action to CI; add a test for removing stale `select` entities.
 3. M6: `homeo.explain` (per-subexpression values, the active arm, sugar expanded). The IR's
    `text` fields and the cells' change times are the raw material.
@@ -479,6 +489,9 @@ uv venv --python 3.14 && uv pip install -r requirements_test.txt
 .venv/bin/ruff check custom_components tests tools && .venv/bin/ruff format --check custom_components tests tools
 .venv/bin/python tools/make_icon.py               # redraw the brand icon
 ```
+
+`tools/real_ha.py` is a slower smoke test in a full Home Assistant; its docstring says how to
+run it (it needs its own venv).
 
 Reading order for a newcomer: `docs/design.md` (the spec), this document (§1 layout, §2 runtime
 model, §3 decisions), then `core/checker.py` and `core/runtime.py`. Runtime behaviour is

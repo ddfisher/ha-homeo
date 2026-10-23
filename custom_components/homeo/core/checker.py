@@ -1390,7 +1390,9 @@ class Checker:
                 self.fail("expected `domain.service(…)` or `entity.service(…)`", c.func.span)
             entity_id = node.cell.entity_id
             domain, service = entity_id.split(".")[0], segs[0].name
-        elif head.id in self.domains and len(segs) == 1:
+        elif len(segs) == 1:
+            # Any domain: many have services but no entities (persistent_notification,
+            # shell_command, tts, …). A typo is caught by the service check below.
             domain, service = head.id, segs[0].name
         elif head.id in self.domains and len(segs) == 2:
             entity_id = f"{head.id}.{segs[0].name}"
