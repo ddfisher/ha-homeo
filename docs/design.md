@@ -160,8 +160,7 @@ These weren't discussed. Decide each one, document it here, and flag it to the o
 
 ### Repository state
 
-- **Repository name:** the GitHub repo is `ddfisher/ha-dsl`. The name predates "Homeo", and the
-  owner may rename it.
+- **Repository name:** the GitHub repo is `ddfisher/ha-homeo` (formerly `ddfisher/ha-dsl`).
 - **Branches:** `main` holds only this document. Early prototypes (pyscript code generation, and a
   Python operator-overloading library) were deleted. They survive only in the history of the
   `claude/upbeat-hawking-3wnqwd` branch. They use superseded syntax and approaches; don't build
