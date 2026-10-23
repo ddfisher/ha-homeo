@@ -85,7 +85,7 @@ Top-level statements:
 |---|---|
 | **Binding** `fan.x = <signal>` | keep this entity in sync with the signal |
 | **Definition** `stuffy = <signal>` | a named local signal, not an HA entity |
-| **State machine** `state mode = "init"` + arms | a named signal that remembers (§13) |
+| **State machine** `state mode = "init":` + arms | a named signal that remembers (§13) |
 | **Action** `on <signal>: <service calls>` | imperative escape hatch (notifications etc., §14) |
 
 Value types: `bool`, `number`, `string`, `duration`, `time-of-day`, `timestamp`. Any value can
@@ -98,7 +98,7 @@ also be `unknown`. Type errors come with hints, e.g.
 
 A **custom, Python-flavoured grammar** with our own parser: a Pratt parser for expressions plus an
 indentation-aware lexer. It looks like Python (`and`/`or`/`not`, `x if c else y`, indentation)
-but adds what Python can't express: `5min`, `50%`, `22:00`, `for`, `until`, `|` arms, `->`.
+but adds what Python can't express: `5min`, `50%`, `22:00`, `for`, `until`, `->` arms, `|` guards.
 
 Rejected: strict Python syntax parsed with `ast` plus a token pre-pass. Every temporal form would
 need a pre-pass hack or turn into a function call. A hand-written parser also gives better error
@@ -181,42 +181,42 @@ what everyone writes first, and the local/entity distinction already comes from 
 
 ---
 
-## 8. Priority cascades: D6 (Decided: `| cond -> value` arms)
+## 8. Priority cascades: D6 (Decided: `cond -> value` arms, `|` for guarded sub-arms)
 
 Most real rules are a **priority list**: several reasons a device might be on or off, where some
-reasons beat others. Cascades are the dedicated layout for that, with Haskell-style `|` guards:
+reasons beat others. Cascades are the dedicated layout for that:
 
 ```python
 fan.bathroom =
-    | age(remote.press) < 30min          -> on          # temporary boost
-    | window                             -> off
-    | else                               -> stuffy
+    age(remote.press) < 30min          -> on          # temporary boost
+    window                             -> off
+    else                               -> stuffy
 
 climate.living.temperature =
-    | window.living                      -> 7           # frost protection only
-    | not anyone_home for 2h             -> 15
-    | age(input_button.warm_up) < 2h     -> 22
-    | now in 23:00..06:30                -> 17
-    | else                               -> 20.5
+    window.living                      -> 7           # frost protection only
+    not anyone_home for 2h             -> 15
+    age(input_button.warm_up) < 2h     -> 22
+    now in 23:00..06:30                -> 17
+    else                               -> 20.5
 
 light.hall =
-    | age(manual(light.hall)) < 1h       -> keep
-    | motion or age(motion) < 5min       ->             # a result can be another cascade
-        | night                          -> on(brightness: 10%, kelvin: 2200)
-        | else                           -> on(brightness: 100%)
-    | else                               -> off
+    age(manual(light.hall)) < 1h       -> keep
+    motion or age(motion) < 5min                      # a guard with sub-arms
+        | night                        -> on(brightness: 10%, kelvin: 2200)
+        | else                         -> on(brightness: 100%)
+    else                               -> off
 ```
 
-- **Every arm starts with `|`.** That makes arms trivial to find, for people and for the parser.
-  A long condition can wrap onto the next line without ambiguity. `|` has no other meaning in
-  the language (logical or is `or`).
-- **First match wins.** Arms are checked top to bottom.
-- **Nesting:** an arm whose result is an indented block of arms matches only if one of its inner
-  arms matches.
+- **One arm per line: `condition -> result`.** First match wins, top to bottom.
+- **Guards with sub-arms:** a condition with no `->`, followed by indented `|` lines, is a group.
+  Its sub-arms only apply while the condition is true. The group matches only if one of its
+  sub-arms matches; otherwise evaluation falls through to the next arm. Groups can nest.
+- **Parsing is unambiguous:** a line starting with `|` is a sub-arm. Any other more-indented
+  line continues the previous arm, so long conditions can wrap.
 - **A final `else` is required in bindings** (compile error otherwise). State machines differ
   (§13).
 - **Values can be anything:** `on`/`off`, numbers, `on(brightness: …)`, `keep`, or another
-  expression or cascade.
+  expression.
 - **The cascade is one expression,** re-evaluated whenever any input changes. The binding writes
   when the result changes. That includes moving from one arm to another, e.g. when a
   higher-priority condition stops being true.
@@ -290,18 +290,18 @@ press for buttons and events, and the moment it last became true for bool condit
 
 ```python
 light.desk = latest
-    | input_button.desk_on       -> on
-    | input_button.desk_off      -> off
-    | else                       -> off          # neither has ever happened
+    input_button.desk_on       -> on
+    input_button.desk_off      -> off
+    else                       -> off          # neither has ever happened
 
 blinds_mode = latest
-    | input_button.blinds_auto   -> "auto"
-    | manual(cover.blinds)       -> "manual"     # a manual change sticks until "auto" is pressed
-    | else                       -> "auto"
+    input_button.blinds_auto   -> "auto"
+    manual(cover.blinds)       -> "manual"     # a manual change sticks until "auto" is pressed
+    else                       -> "auto"
 ```
 
-- **Arms use the same `|` syntax as cascades.** Results can be any expression, including another
-  cascade.
+- **Arms use the same syntax as cascades** (`cond -> result`, with `|` sub-arms). Results can be
+  any expression.
 - **`else`** is used when none of the conditions has ever happened. It's required in bindings,
   as with cascades.
 - **Conditions must be bools or timestamps.** Anything else is a type error.
@@ -327,7 +327,7 @@ and `ha_dsl.explain` can show the expansion.
 | Sugar | Expands to | Status |
 |---|---|---|
 | `x for D` | `x and age(x) >= D` | **Decided** |
-| `a until b` | `latest` with `\| a -> true`, `\| b -> false`, `\| else -> false` | Proposed |
+| `a until b` | a `latest` block with arms `a -> true`, `b -> false`, `else -> false` | Proposed |
 | `x debounced D` | the binding writes only once the value has been stable for D: `age(value) >= D` | Proposed |
 
 ```python
@@ -336,9 +336,9 @@ fan.bedroom = co2 > 800 until co2 < 700          # latch: on above 800, off belo
 
 # `until` written out:
 fan.bedroom = latest
-    | co2 > 800                  -> on
-    | co2 < 700                  -> off
-    | else                       -> off
+    co2 > 800                  -> on
+    co2 < 700                  -> off
+    else                       -> off
 ```
 
 - **Debounce:** block form `with debounce 2min:` (every binding inside), or per binding:
@@ -361,13 +361,13 @@ A time on its own, where a condition is expected, is a **time point**: a timesta
 value is its most recent occurrence. It behaves like a button that HA presses every day at that
 time:
 ```python
-| fresh(07:00) and workday       -> "home"      # 07:00 has passed since entering this state
+fresh(07:00) and workday       -> "home"      # 07:00 has passed since entering this state
 on sunset - 30min:                               # action, daily
 ```
 
 So `07:00` means a time of day inside `now in …` ranges and comparisons, and a time point
-elsewhere. That's unambiguous for the compiler. If it reads confusingly in practice, the
-explicit fallback is `at(07:00)`.
+elsewhere. That's unambiguous for the compiler. **Decided:** `fresh(07:00)` as written. We'll
+revisit (e.g. an explicit `at(07:00)`) only if it causes confusion in practice.
 
 ---
 
@@ -391,47 +391,47 @@ logic lives in the machine; what each device does lives in ordinary cascades tha
 
 ```python
 fan.bathroom =
-    | bath_mode == "boost"   -> on
-    | bath_mode == "off"     -> off
-    | else                   -> stuffy
+    bath_mode == "boost"   -> on
+    bath_mode == "off"     -> off
+    else                   -> stuffy
 ```
 
-### D13a. Shape: a TEA reducer with `|` arms (Decided, provisionally; revisit after real use)
+### D13a. Shape: a TEA reducer (Decided, provisionally; revisit after real use)
 
-`state name = initial`, followed by arms that compute the new value. Arms can nest (§8), so they
-can be grouped by state, by trigger, or not at all:
+`state name = initial:`, followed by arms that compute the new value. Guards with `|` sub-arms
+(§8) let you group arms by state, by trigger, or not at all:
 
 ```python
-state bath_mode = "auto"
-    | fresh(remote.long_press)                    -> "off"
-    | fresh(remote.press) ->                                  # grouped by trigger
-        | bath_mode == "auto"                     -> "boost"
-        | else                                    -> "auto"
-    | bath_mode == "boost" for 1h                 -> "auto"
-    | bath_mode == "off" for 2h                   -> "auto"
+state bath_mode = "auto":
+    fresh(remote.long_press)                    -> "off"
+    fresh(remote.press)                                       # grouped by trigger
+        | bath_mode == "auto"                   -> "boost"
+        | else                                  -> "auto"
+    bath_mode == "boost" for 1h                 -> "auto"
+    bath_mode == "off" for 2h                   -> "auto"
 
-state washer = "idle"
-    | washer != "running" and washer_power > 10 for 2min      -> "running"
-    | washer == "running" and washer_power < 3 for 5min       -> "done"
-    | washer == "done" and fresh(binary_sensor.washer_door)   -> "idle"
+state washer = "idle":
+    washer != "running" and washer_power > 10 for 2min      -> "running"
+    washer == "running" and washer_power < 3 for 5min       -> "done"
+    washer == "done" and fresh(binary_sensor.washer_door)   -> "idle"
 
-on washer == "done":                                          # entry action = ordinary action
+on washer == "done":                                        # entry action = ordinary action
     notify.phone(message: "Washing is done")
 
-state house = "home"
-    | house == "home" ->                                      # grouped by state
-        | not anyone_home for 10min               -> "away"
-        | fresh(input_button.goodnight)           -> "night"
-        | fresh(input_button.movie)               -> "movie"
-    | house == "away" ->
-        | anyone_home                             -> "home"
-    | house == "night" ->
-        | fresh(07:00) and workday                -> "home"
-        | fresh(09:00)                            -> "home"
+state house = "home":
+    house == "home"                                         # grouped by state
+        | not anyone_home for 10min             -> "away"
+        | fresh(input_button.goodnight)         -> "night"
+        | fresh(input_button.movie)             -> "movie"
+    house == "away"
+        | anyone_home                           -> "home"
+    house == "night"
+        | fresh(07:00) and workday              -> "home"
+        | fresh(09:00)                          -> "home"
         | fresh(kitchen_motion and now in 05:00..07:00) -> "home"
-    | house == "movie" ->
-        | fresh(input_button.movie)               -> previous(house)
-        | age(house) > 4h                         -> previous(house)
+    house == "movie"
+        | fresh(input_button.movie)             -> previous(house)
+        | age(house) > 4h                       -> previous(house)
 ```
 
 ### D13b. Semantics: arms are plain conditions (Decided)
@@ -442,8 +442,8 @@ state house = "home"
 - **Arms read the value from before the update,** as in TEA. So `bath_mode == "auto"` inside
   `bath_mode`'s own arms is allowed, and isn't a cycle.
 - **There are no triggers or edges.** Arms are ordinary conditions, so they're level-triggered.
-  `| house == "away" -> anyone_home -> "home"` also fires if the machine enters `away` while
-  someone is home. When you only want what happened *after* entering the current state, use
+  `house == "away"` with the sub-arm `| anyone_home -> "home"` also fires if the machine enters
+  `away` while someone is home. When you only want what happened *after* entering the current state, use
   `fresh()`.
 - **Timeouts** are ordinary conditions: `bath_mode == "boost" for 1h`, or `age(house) > 4h`.
 - **Chains:** if a transition makes another arm match, it is applied too. The same value
@@ -490,9 +490,9 @@ state across restarts (restore state).
 
 ---
 
-## 14. Actions: D14 (Proposed)
+## 14. Actions and effects: D14 (Open, in discussion)
 
-For things that aren't state: notifications, TTS, one-off scripts.
+For things that aren't state: notifications, TTS, flashing a light, running a script.
 
 ```python
 on input_button.doorbell:
@@ -505,19 +505,65 @@ on humidity > 90% for 30min:
     notify.mobile_app_phone(message: "Bathroom still very humid. Window open?")
 ```
 
-**`on x:` runs once each time `x` happens:** when `t(x)` is later than the last time this action
-handled `x`. It's the same idea as `fresh()`, relative to the action instead of a machine.
-- `if g` is checked at that moment. If it's false, the occurrence counts as handled but the body
-  doesn't run. So the porch light flashes only if Ann *arrives* during the night, not when night
-  falls while she's home.
-- **Restart catch-up is automatic,** because the bookkeeping is persisted. Proposed limit: skip
-  occurrences more than 1h old (configurable), since a notification six hours late is usually
-  noise.
-- On first load, the bookkeeping starts at "now", so nothing from the past fires.
+### Why `on` is still needed
 
-Service calls are written `domain.service(arg: value)`, or `entity.service(…)` to set the
-target. Actions can read signals but can't assign to entities that have bindings (compile
-error), which prevents fights. There's no `sleep`/`wait` in v1: if you need delays, use state.
+Everything else in the language describes **values**. The runtime may evaluate them any number
+of times, re-evaluates them after restarts, and only *changes* reach HA. Bindings write only when
+their result changes, and they step aside for `keep`. That's exactly right for state, and exactly
+wrong for **effects**, where what matters is *how many times* something happens:
+
+- one notification per doorbell press: not zero (if a value happens not to change), and not two
+  (if the rules are re-evaluated after a restart);
+- not suppressed by an override, and not "re-synced" later.
+
+Getting that right needs bookkeeping: which occurrences have already been handled. **`on` is the
+one construct with that bookkeeping.** In React terms, bindings are `render` (pure and
+idempotent) and `on` is `useEffect`. In Elm terms, `on` produces a `Cmd`.
+
+It isn't a separate mechanism, though. Each action keeps one persisted timestamp, "last handled".
+**`on x if g: body` means: whenever `t(x)` is later than the last-handled time, set last-handled
+to `t(x)`, and run `body` if `g` is true.** That's the same comparison as `fresh()`, relative to
+the action instead of a state machine.
+
+### `if` vs `and` in the header
+
+Both are meaningful, and they differ:
+
+| | Fires when |
+|---|---|
+| `on person.ann == "home" if night:` | Ann **arrives** while it's night. A daytime arrival is marked handled without running, so nightfall later doesn't trigger it. In FRP terms, this filters the arrival events. |
+| `on person.ann == "home" and night:` | "Ann home and it's night" **becomes true**: she arrives at night, *or* night falls while she's home. |
+
+### Option to consider: declarative notifications
+
+Many actions are really notifications, and notifications can be state. The HA mobile app
+supports a `tag` (a newer notification replaces the old one) and `clear_notification`. So a
+notification could be a binding, React-style:
+
+```python
+notify.mobile_app_phone =
+    washer == "done"      -> "Washing is done"
+    else                  -> none
+```
+
+This sends the message when the value changes to it, and **clears it from the phone** when it goes
+back to `none` (here, when the washer leaves `done`). Restarts are handled by the same
+"write only on change" rule as other bindings. It doesn't cover true one-offs (a ding per
+doorbell press, TTS, `flash()`), so `on` would remain for those.
+
+**Recommendation:** keep `on x [if g]:` as the single effect construct in v1. Decide separately
+whether declarative notification targets are worth adding (v1 or v2).
+
+### Other details (Proposed)
+
+- **Restart catch-up is automatic,** because "last handled" is persisted. Skip occurrences more
+  than 1h old (configurable), since a notification six hours late is usually noise.
+- On first load, "last handled" starts at "now", so nothing from the past fires.
+- Service calls are written `domain.service(arg: value)`, or `entity.service(…)` to set the
+  target.
+- Actions can read signals but can't call services on entities that have bindings (compile
+  error), which prevents fights.
+- There's no `sleep`/`wait` in v1: if you need delays, use state.
 
 ---
 
@@ -533,8 +579,8 @@ For a time limit, use `manual()` and `keep` (no new concepts):
 
 ```python
 fan.bathroom =
-    | age(manual(fan.bathroom)) < 1h   -> keep      # yield for an hour after a manual change
-    | else                             -> stuffy
+    age(manual(fan.bathroom)) < 1h   -> keep      # yield for an hour after a manual change
+    else                             -> stuffy
 ```
 
 …with sugar for the common cases:
@@ -554,7 +600,7 @@ Rejected alternatives:
 - a timed back-off by default, because it surprises you when you forget it's there;
 - always enforcing by default, because it's wrong for lights and fans.
 
-### D21. Detecting manual changes (Proposed)
+### D21. Detecting manual changes (Decided)
 
 HA attaches a **`Context`** (`id`, `parent_id`, `user_id`) to every state change. When ha_dsl
 calls a service, it creates the context and records its id. HA entities then use that context
@@ -572,9 +618,8 @@ A change to a driven entity counts as **manual** when all of these hold:
 3. **It isn't a transition to or from `unavailable`/`unknown`.** A device dropping off the
    network and coming back isn't a human action.
 
-Open detail: should changes by *other HA automations* count as manual? Proposed **yes** by
-default, so another automation's change is respected like a person's, with
-`manual(x, by: "user")` to restrict to people (UI/app/physical).
+Changes made by *other* HA automations and scripts count as manual too, so they're respected like
+a person's. (A way to restrict this to people only can be added later if needed.)
 
 Known limits:
 - A device that changes on its own (e.g. a smart plug's built-in schedule) looks like a physical
@@ -643,7 +688,7 @@ with no runtime cost. Leaving this out of v1 is fine.
 
 | | |
 |---|---|
-| `\| cond -> result` (arms) | block structure, one arm per `\|` |
+| `cond -> result` (arms), `\| cond -> result` (sub-arms) | block structure: one arm per line |
 | `on x if g:` (action header) | |
 | `x if c else y` | |
 | `or` | |
@@ -672,25 +717,25 @@ motion   = binary_sensor.bathroom_motion
 stuffy = (co2 > 800 until co2 < 700) or humidity > 70% for 2min
 night  = now in 22:00..07:00
 
-state bath_mode = "auto"
-    | fresh(remote.long_press)            -> "off"
-    | fresh(remote.press) ->
-        | bath_mode == "auto"             -> "boost"
-        | else                            -> "auto"
-    | bath_mode == "boost" for 30min      -> "auto"
-    | bath_mode == "off" for 2h           -> "auto"
+state bath_mode = "auto":
+    fresh(remote.long_press)            -> "off"
+    fresh(remote.press)
+        | bath_mode == "auto"           -> "boost"
+        | else                          -> "auto"
+    bath_mode == "boost" for 30min      -> "auto"
+    bath_mode == "off" for 2h           -> "auto"
 
 with override 1h:
     fan.bathroom =
-        | bath_mode == "boost"            -> on
-        | bath_mode == "off"              -> off
-        | window                          -> off
-        | night and not humidity > 85%    -> off
-        | else                            -> stuffy
+        bath_mode == "boost"            -> on
+        bath_mode == "off"              -> off
+        window                          -> off
+        night and not humidity > 85%    -> off
+        else                            -> stuffy
 
 light.bathroom =
-    | motion or age(motion) < 5min        -> on(brightness: 10% if night else 100%)
-    | else                                -> off
+    motion or age(motion) < 5min        -> on(brightness: 10% if night else 100%)
+    else                                -> off
 
 on humidity > 90% for 30min:
     notify.mobile_app_phone(message: "Bathroom still very humid. Window open?")
@@ -708,25 +753,25 @@ on humidity > 90% for 30min:
 | D3 | Attributes / string states | Proposed | `entity.attr`; quoted strings, `on`/`off` keywords |
 | D4 | Units & literals | Proposed | `5min`, `50%`, `22:00`, `sunset - 30min` |
 | D5 | Binding operator & targets | Proposed | `=`, per-domain writers, `on(attr: …)`, `keep` |
-| D6 | Priority cascades | **Decided** | `\| cond -> value` arms, first match wins, `else` required in bindings |
+| D6 | Priority cascades | **Decided** | `cond -> value` arms, `\|` for guarded sub-arms, first match wins, `else` required in bindings |
 | D7 | Event sources | Proposed | timestamp signals; table in §9 |
 | D8 | Event-type filter | Open | `event.remote.double_press` |
 | D9 | Events | **Decided** | no event type: events are timestamp-valued state, as in HA |
 | D10 | Recency | **Decided** | `age(x)`: time since `x` last changed |
 | D11 | Temporal sugar | **Decided** (`for`) / Proposed | `x for D` = `x and age(x) >= D`; `until` = two-arm `latest`; `debounced`, `min_on` |
-| D12 | Time | Proposed | `now in 22:00..06:00` ranges; a bare time is a time point |
-| D13a | State machine shape | **Decided (provisional)** | `state m = init` + `\|` arms (TEA reducer); revisit after real use |
+| D12 | Time | Proposed / **Decided** (time points) | `now in 22:00..06:00` ranges; `fresh(07:00)`: a bare time is a time point |
+| D13a | State machine shape | **Decided (provisional)** | `state m = init:` + arms (TEA reducer); revisit after real use |
 | D13b | State machine semantics | **Decided** | arms are level-triggered conditions; chains with loop detection; restarts just re-evaluate |
 | D13c | Referring to states | **Decided** | string comparison, compile-time checked |
 | D13d | Visibility in HA | **Decided** | writable `select.ha_dsl_<name>` |
-| D14 | Actions | Proposed | `on x if g:` runs once per occurrence; catch-up capped at 1h |
+| D14 | Actions / effects | **Open (in discussion)** | keep `on x [if g]:` as the one effect construct; maybe declarative notifications |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `age(manual(x)) < D -> keep` |
 | D16 | Unknown handling | Proposed | Kleene logic, unknown → keep, change times skip dropouts |
 | D17 | Startup | Proposed | write only if different from persisted last value |
 | D18 | Abstraction | Open (v2) | compile-time templates |
-| D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `\|` arms |
+| D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `cond -> value` arms |
 | D20 | "Since entering this state" | **Decided** | `fresh(x)`, only inside `state` blocks |
-| D21 | Manual-change detection | Proposed | HA `Context` + differs from last write + not (un)availability; other automations count |
+| D21 | Manual-change detection | **Decided** | HA `Context` + differs from last write + not (un)availability; other automations count |
 
 ---
 
@@ -734,8 +779,8 @@ on humidity > 90% for 30min:
 
 ### A1. Cascade layouts (D6)
 
-- **Condition first without `|`** (`cond -> value`, one per line): the earlier decision.
-  Replaced by `|` arms, which are easier to scan and parse, and are familiar from Haskell guards.
+- **`|` on every arm** (`| cond -> value` everywhere): too noisy. `|` is now used only for the
+  sub-arms under a guard, where it replaces the earlier `cond ->` followed by an indented block.
 - **Value first** (`value when cond`): outputs line up on the left, but long values push
   conditions off to the right, and nesting reads awkwardly.
 - **Chained ternaries only:** no new syntax, but hard to read past three branches.
