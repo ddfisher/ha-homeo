@@ -1,6 +1,6 @@
-<img src="custom_components/homeo/brand/icon.png" alt="" width="96" align="right">
-
 # Homeo
+
+<img src="custom_components/homeo/brand/icon.png" alt="" width="96" align="right">
 
 Declarative rules for Home Assistant. Instead of trigger/condition/action automations, you
 describe what each device should be, given the state of the world:
