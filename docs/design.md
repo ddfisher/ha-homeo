@@ -36,7 +36,7 @@ Non-goals for v1: replacing HA's UI automation editor; dashboards; arbitrary Pyt
 | The DSL has its own syntax, compiled inside HA at load time (not a Python library) | **Decided** |
 | Compile straight to an in-memory signal graph, not to Python source | **Decided** |
 | Reloads are atomic: if a file has errors, keep the old rules running and report | **Decided** |
-| v1 keeps no storage of its own: it relies on what HA itself restores, and treats anything older than a restart as "some time before the restart" (§17) | **Proposed** |
+| v1 keeps no storage of its own: it relies on what HA itself restores, and treats anything older than a restart as "some time before the restart" (§17) | **Decided** |
 
 **Why compile to a graph rather than generate Python?** The compiler's output would only be
 runtime objects anyway (signals, bindings, timers, as in `spike/library/`). Building them
@@ -178,7 +178,7 @@ cover.blinds.position := 0 if now in sunset..sunrise else 100
   left as it is. When the expression stops being `keep`, the binding writes again. This is the
   basis of override handling (§15).
 
-### Writers (Open, in discussion)
+### Writers (Decided)
 
 HA has no "set the state of this device". You change a device by **calling a service**, and the
 right service and its data depend on the domain and on what you're setting. A **writer** is the
@@ -208,15 +208,15 @@ Proposed v1 writers:
 | lock | `lock.front := "locked"` | `lock.lock` / `lock.unlock` |
 | media volume | `media_player.tv.volume := 30%` | `media_player.volume_set` |
 
-Questions to settle:
+Decisions:
 
-- **Lights as a whole, or by attribute?** Setting a light's brightness turns it on, so
+- **A light is bound as a whole.** Setting a light's brightness turns it on, so
   `light.hall := off` and `light.hall.brightness := 50%` as separate bindings would fight.
-  Proposed: a light is bound as a whole (`off`, or `on(brightness: …, kelvin: …)`), and binding
-  its attributes separately is a compile error. Climate's mode and setpoint use independent
-  services, so separate bindings are fine there.
-- **Anything not in the table** (vacuums, alarm panels, water heaters, …): in v1, use actions
-  (`on x: vacuum.start()`). Proposed for v2: user-defined writers that name the service to call
+  Lights take `off`, or `on(brightness: …, kelvin: …)`, and binding a light's attributes
+  separately is a compile error. Climate's mode and setpoint use independent services, so
+  separate bindings are fine there.
+- **Anything not in the table** (vacuums, alarm panels, water heaters, …) is handled with actions
+  in v1 (`on x: vacuum.start()`). v2 may add user-defined writers that name the service to call
   for each value.
 
 ---
@@ -693,6 +693,12 @@ Known limits:
 
 - Three-valued logic: `on or unknown` = `on`, `off and unknown` = `off`, otherwise `unknown`.
 - If a binding's result is `unknown`, the target is left alone (an implicit `keep`).
+- **A binding writes when its result changes from one known value to a different known value.**
+  "Previous" means the last *known* result, skipping `unknown` periods:
+  - `on → unknown → off` writes `off`;
+  - `on → unknown → on` writes nothing;
+  - if there is no previous known result at all, the first known result isn't a change, so
+    nothing is written. That happens after a restart (§17) and for a brand-new binding.
 - Fallbacks: `co2 ?? 0`, or `available(sensor.co2)` as an explicit test.
 - In cascades and `latest`, an `unknown` condition falls through to the next arm. (The
   alternative, making the whole result `unknown`, is safer but brittle: one flaky sensor would
@@ -703,7 +709,7 @@ Known limits:
 
 ---
 
-## 17. Startup and restarts: D17 (Proposed, revised)
+## 17. Startup and restarts: D17 (Decided)
 
 Restarts are rare, so v1 aims for behaviour that is **predictable and never surprising**, not
 exact catch-up. **Principle: a restart never moves a device by itself.**
@@ -737,13 +743,18 @@ exact catch-up. **Principle: a restart never moves a device by itself.**
      occurrences can't be ordered, so the result is `unknown`.
 
    So `light.hall := motion or age(motion) < 10min` doesn't switch the light on after a reboot.
-3. **Each binding adopts its first definite result after a restart without writing it.** Writes
-   resume on the next change of that result. This means:
+3. **Bindings need no restart rule of their own.** A binding's previous result isn't stored, so
+   after a restart it's `unknown`. By D16, the first known result is then not a change, and
+   nothing is written. Writes resume on the next change of that result. This means:
    - a device that should have changed while HA was down catches up at the next relevant change,
      not at boot;
    - a manual change made before the restart survives it until the rule's result next changes;
    - a timed override (`age(manual(x)) < 1h -> keep`) becomes "until the next change".
 4. **Actions treat everything before the restart as handled.** No catch-up.
+   - **Rule reloads are not restarts (Proposed).** When a file is edited, each binding that
+     still exists keeps its previous known result. An edit that changes a rule's result
+     therefore applies immediately. A brand-new binding waits for its first change, as above.
+     A `ha_dsl.resync` service can force bindings to write their current result.
 5. **State machines** keep their restored value and re-evaluate (§13). A 07:00 transition missed
    during downtime still happens at boot. Arms on bool conditions wait until those conditions
    change again.
@@ -865,7 +876,7 @@ on humidity > 90% for 30min:
 | D2 | Names | **Decided** | `let name = expr` for aliases and computed values; `:=` binds; one namespace across files (proposed) |
 | D3 | Attributes / string states | **Decided** | `entity.attr`; quoted strings, `on`/`off` keywords |
 | D4 | Units & literals | **Decided** | `5min`, `50%`, `22:00`, `sunset - 30min` |
-| D5 | Bindings & targets | **Decided** (`:=`, one writer, `keep`) / Open (writers) | built-in writer table; lights bound as a whole; unsupported domains via actions in v1 |
+| D5 | Bindings & targets | **Decided** | `:=`; one writer per target; `keep`; built-in writer table; lights bound as a whole; other domains via actions in v1 |
 | D6 | Priority cascades | **Decided** | `cond -> value` arms, `\|` for guarded sub-arms, first match wins, `else` required in bindings |
 | D7 | Event sources | **Decided** | timestamp signals; table in §9 |
 | D8 | Event-type filter | **Decided** | `event.remote.double_press` |
@@ -880,8 +891,8 @@ on humidity > 90% for 30min:
 | D13f | Reload & v2 deferrals | **Decided** | keep state across reloads if it still exists; nested states and extended state deferred to v2 |
 | D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; no catch-up after restarts (D17) |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `age(manual(x)) < D -> keep` |
-| D16 | Unknown handling | **Decided** | Kleene logic, unknown → keep, change times skip dropouts |
-| D17 | Restarts | Proposed (revised) | no storage of our own in v1; pre-restart change times are lower bounds; first result after boot adopted without writing |
+| D16 | Unknown handling | **Decided** | Kleene logic; unknown → keep; change times skip dropouts; a binding writes only between known results |
+| D17 | Restarts | **Decided** (reload details proposed) | no storage of our own in v1; pre-restart change times are lower bounds; no binding writes until a result changes (via D16); reloads keep previous results |
 | D18 | Abstraction | **Decided: v2** | compile-time templates |
 | D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `cond -> value` arms |
 | D20 | "Since entering this state" | **Decided** | `fresh(x)`, only inside `state` blocks |
