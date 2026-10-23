@@ -12,15 +12,16 @@ File extension placeholder: `.hdsl` (name TBD, see D0).
 ## 1. Goals
 
 - **Declarative state (FRP).** Write "what each device should be, given the world",
-  e.g. `fan.bathroom = co2 > 800 or humidity > 60%`. The system keeps it true across transitions.
+  e.g. `fan.bathroom := co2 > 800 or humidity > 60%`. The system keeps it true across transitions.
 - **Events are just state with a timestamp,** as Home Assistant already stores them. "Was the
   button pressed in the last hour?" is `age(input_button.boost) < 1h`. That makes temporary
   overrides a one-liner, with no imperative timers.
 - **Readable by someone who knows a little Python.** Python-flavoured, indentation-based,
   `and`/`or`/`not`, `x if c else y`.
 - **Mistakes caught at load time:** unknown entities, type errors, conflicting writers, cycles.
-- **A small core, with sugar defined in terms of it.** `for`, `until` and `on` are all defined
-  as rewrites into core constructs (§11, §14).
+- **A small core, with sugar defined in terms of it.** Sugar like `for` and `with override` is
+  defined as a rewrite into core constructs (§11, §15). More sugar is only added once real rules
+  show a need (§11, "maybe later").
 
 Non-goals for v1: replacing HA's UI automation editor; dashboards; arbitrary Python inside rules.
 
@@ -35,18 +36,17 @@ Non-goals for v1: replacing HA's UI automation editor; dashboards; arbitrary Pyt
 | The DSL has its own syntax, compiled inside HA at load time (not a Python library) | **Decided** |
 | Compile straight to an in-memory signal graph, not to Python source | **Decided** |
 | Reloads are atomic: if a file has errors, keep the old rules running and report | **Decided** |
-| The runtime persists every signal's value and change time that it depends on (plus state machines, last-written values, action bookkeeping) with HA's `Store` | **Open (in discussion)** |
+| v1 keeps no storage of its own: it relies on what HA itself restores, and treats anything older than a restart as "some time before the restart" (§17) | **Proposed** |
 
 **Why compile to a graph rather than generate Python?** The compiler's output would only be
 runtime objects anyway (signals, bindings, timers, as in `spike/library/`). Building them
 directly means no code generation, no `exec`, and errors that carry the user's file and line
 numbers for free.
 
-**Why persist change times ourselves?** After an HA restart, `last_changed` is reset to the boot
-time for most entities. That would make `age(motion) < 10min` or `door for 10min` wrong right
-after a restart. Timestamp-valued entities (`event.*`, `input_button.*`, `button.*`) carry their
-time in their state, but nothing else does reliably. So the runtime records the change times it
-needs, persists them, and dates changes that happened while HA was down to the restart.
+**Restarts are rare, so v1 doesn't try to reconstruct history across them.** HA resets
+`last_changed` to the boot time for most entities. Rather than keeping our own copy, v1 treats
+those change times as unknown-but-before-the-restart, and is careful not to move devices because
+of a restart (§17). Persistence can be added piece by piece later if reboots turn out to matter.
 
 Pipeline: `file → parse → AST → resolve names + type-check → graph → Runtime ↔ HassHost`.
 
@@ -83,8 +83,8 @@ Top-level statements:
 
 | Statement | Meaning |
 |---|---|
-| **Binding** `fan.x = <signal>` | keep this entity in sync with the signal |
-| **Definition** `stuffy = <signal>` | a named local signal, not an HA entity |
+| **Binding** `fan.x := <signal>` | keep this entity in sync with the signal |
+| **Definition** `let stuffy = <signal>` | a named value: an alias for an entity, or anything computed |
 | **State machine** `state mode = "init":` + arms | a named signal that remembers (§13) |
 | **Action** `on <signal>: <service calls>` | imperative escape hatch (notifications etc., §14). Top-level only. |
 
@@ -98,7 +98,7 @@ also be `unknown`. Type errors come with hints, e.g.
 
 A **custom, Python-flavoured grammar** with our own parser: a Pratt parser for expressions plus an
 indentation-aware lexer. It looks like Python (`and`/`or`/`not`, `x if c else y`, indentation)
-but adds what Python can't express: `5min`, `50%`, `22:00`, `for`, `until`, `->` arms, `|` guards.
+but adds what Python can't express: `5min`, `50%`, `22:00`, `for`, `let`, `:=`, `->` arms, `|` guards.
 
 Rejected: strict Python syntax parsed with `ast` plus a token pre-pass. Every temporal form would
 need a pre-pass hack or turn into a function call. A hand-written parser also gives better error
@@ -108,14 +108,24 @@ messages. We can ship a VS Code / TextMate grammar later.
 
 ## 5. Names, entities and strings
 
-### D2. Entity references (Proposed)
+### D2. Names: `let` and `:=` (Decided)
 
-- Full entity ids are always valid: `sensor.bathroom_co2`.
-  Known HA domains are recognised lexically, so `sensor.x` is never ambiguous.
-- Definitions double as aliases: `co2 = sensor.bathroom_co2`.
-- A name with no dot is local; a dotted name is an HA entity. So the form of a name tells you
-  whether assigning to it is a definition or a binding.
-- **Open idea (v2):** area-scoped blocks (`in area bathroom: fan = co2 > 800`), resolved through
+- **Full entity ids** are always valid: `sensor.bathroom_co2`. Known HA domains are recognised
+  lexically, so `sensor.x` is never ambiguous.
+- **`let name = expr`** names anything. An alias is just the simplest case:
+  ```python
+  let co2     = sensor.bathroom_co2                 # alias
+  let exhaust = fan.bathroom_exhaust                # alias for something we'll drive
+  let stuffy  = co2 > 800 or humidity > 70%         # computed value
+  ```
+- **`:=` is the only way to drive a device:** `exhaust := stuffy`. Its left side must be an entity
+  or attribute, written out or through a `let` that is a plain entity reference. `:=` on a
+  computed `let` is a compile error.
+- **Every line that changes a device is visibly marked by `:=`.** Plain `=` only appears in `let`
+  and `state` declarations.
+- **Proposed:** `let` and `state` names share one namespace across all rule files, so a `house`
+  mode defined in one file can be used in another. Duplicate names are compile errors.
+- **Open idea (v2):** area-scoped blocks (`in area bathroom: fan := co2 > 800`), resolved through
   HA's area registry.
 
 Unknown entity ids are errors, with "did you mean". The check runs against HA's entity registry
@@ -152,32 +162,62 @@ is `unknown`, not an error.
 
 ---
 
-## 7. Bindings and targets: D5 (Proposed)
+## 7. Bindings and targets: D5
 
 ```python
-fan.bathroom = co2 > 800 or humidity > 60%          # bool → turn_on / turn_off
-light.hall.brightness = 80% if motion else 0         # attribute → light.turn_on(brightness=…)
-climate.living.temperature = 21 if home else 17      # → climate.set_temperature
-cover.blinds.position = 0 if now in sunset..sunrise else 100
+fan.bathroom := co2 > 800 or humidity > 60%           # → fan.turn_on / fan.turn_off
+light.hall := on(brightness: 80%, kelvin: 2700) if motion else off
+climate.living.temperature := 21 if home else 17      # → climate.set_temperature
+cover.blinds.position := 0 if now in sunset..sunrise else 100
 ```
 
-Several attributes in one service call use a **state literal**:
+- **`:=` binds (Decided, D2).**
+- **One writer per target (Decided).** Two bindings for the same entity (or the same attribute)
+  are a compile error, across all files. Combine them with a cascade (§8).
+- **`keep` (Decided)** is a special value meaning "don't drive this right now". The entity is
+  left as it is. When the expression stops being `keep`, the binding writes again. This is the
+  basis of override handling (§15).
 
-```python
-light.hall = on(brightness: 80%, kelvin: 2700) if motion else off
-```
+### Writers (Open, in discussion)
 
-- **Writers per domain.** A table maps `(domain, attribute)` to a service call:
-  `light` takes `on`/`off`/brightness/kelvin/rgb, `climate` setpoints and `hvac_mode`,
-  `cover` position, `media_player` volume, `input_*` helpers, `select`, `number`.
-- **One writer per target (Decided).** Two bindings for the same entity (or the same attribute) are a
-  compile error, across all files. Combine them with a cascade (§8).
-- **`keep` (Decided)** is a special value meaning "don't drive this right now". The entity is left as it is.
-  When the expression stops being `keep`, the binding writes again. This is the basis of
-  override handling (§15).
+HA has no "set the state of this device". You change a device by **calling a service**, and the
+right service and its data depend on the domain and on what you're setting. A **writer** is the
+built-in rule for one kind of target that knows three things:
 
-Alternatives for the binding operator: `<-`, `:=` or `follows`. `=` is recommended because it's
-what everyone writes first, and the local/entity distinction already comes from the name's form.
+1. **How to write a value:** which service call(s) to make.
+2. **How to read it back:** which state or attribute to compare, in which units. "Write only on
+   change" (D15) and manual-change detection (D21) need this. For example, we write
+   `brightness_pct: 80`, but HA reports `brightness: 204` on a 0–255 scale.
+3. **Whether the target is writable at all.** `sensor.x := 5` and read-only attributes like
+   `light.hall.color_mode` are compile errors.
+
+Proposed v1 writers:
+
+| Target | Example | Service call |
+|---|---|---|
+| on/off: `switch`, `fan`, `light`, `input_boolean`, `siren` | `fan.bathroom := on` | `<domain>.turn_on` / `turn_off` |
+| light with settings | `light.hall := on(brightness: 80%, kelvin: 2700)` | `light.turn_on(brightness_pct: 80, color_temp_kelvin: 2700)` |
+| fan speed | `fan.bathroom.percentage := 60%` | `fan.set_percentage` |
+| climate setpoint | `climate.living.temperature := 21` | `climate.set_temperature` |
+| climate mode | `climate.living := "heat"` | `climate.set_hvac_mode` |
+| cover position | `cover.blinds.position := 30%` | `cover.set_cover_position` |
+| cover open/closed | `cover.blinds := "open"` | `cover.open_cover` / `close_cover` |
+| numbers | `input_number.x := 5`, `number.x := 5` | `set_value` |
+| selects | `input_select.x := "eco"`, `select.x := "eco"` | `select_option` |
+| text | `input_text.x := "…"` | `set_value` |
+| lock | `lock.front := "locked"` | `lock.lock` / `lock.unlock` |
+| media volume | `media_player.tv.volume := 30%` | `media_player.volume_set` |
+
+Questions to settle:
+
+- **Lights as a whole, or by attribute?** Setting a light's brightness turns it on, so
+  `light.hall := off` and `light.hall.brightness := 50%` as separate bindings would fight.
+  Proposed: a light is bound as a whole (`off`, or `on(brightness: …, kelvin: …)`), and binding
+  its attributes separately is a compile error. Climate's mode and setpoint use independent
+  services, so separate bindings are fine there.
+- **Anything not in the table** (vacuums, alarm panels, water heaters, …): in v1, use actions
+  (`on x: vacuum.start()`). Proposed for v2: user-defined writers that name the service to call
+  for each value.
 
 ---
 
@@ -187,19 +227,19 @@ Most real rules are a **priority list**: several reasons a device might be on or
 reasons beat others. Cascades are the dedicated layout for that:
 
 ```python
-fan.bathroom =
+fan.bathroom :=
     age(remote.press) < 30min          -> on          # temporary boost
     window                             -> off
     else                               -> stuffy
 
-climate.living.temperature =
+climate.living.temperature :=
     window.living                      -> 7           # frost protection only
     not anyone_home for 2h             -> 15
     age(input_button.warm_up) < 2h     -> 22
     now in 23:00..06:30                -> 17
     else                               -> 20.5
 
-light.hall =
+light.hall :=
     age(manual(light.hall)) < 1h       -> keep
     motion or age(motion) < 5min                      # a guard with sub-arms
         | night                        -> on(brightness: 10%, kelvin: 2200)
@@ -268,10 +308,10 @@ is, use `event.x["event_type"]`.
 **`age(x)`: time since `x` last changed.** It's the one primitive for recency:
 
 ```python
-boost_active = age(input_button.boost) < 30min        # pressed in the last 30 min
-stale        = age(sensor.co2) > 1h                   # sensor stopped reporting
-light.hall   = motion or age(motion) < 10min          # motion now, or ended < 10 min ago
-override     = age(manual(fan.bathroom)) < 1h         # changed by hand in the last hour
+let boost_active = age(input_button.boost) < 30min     # pressed in the last 30 min
+let stale        = age(sensor.co2) > 1h                # sensor stopped reporting
+let override     = age(manual(fan.bathroom)) < 1h      # changed by hand in the last hour
+light.hall := motion or age(motion) < 10min            # motion now, or ended < 10 min ago
 ```
 
 - For timestamp signals, the change time *is* the value, so `age(remote.press)` is "time since
@@ -289,12 +329,12 @@ override     = age(manual(fan.bathroom)) < 1h         # changed by hand in the l
 press for buttons and events, and the moment it last became true for bool conditions.
 
 ```python
-light.desk = latest
+light.desk := latest
     input_button.desk_on       -> on
     input_button.desk_off      -> off
     else                       -> off          # neither has ever happened
 
-blinds_mode = latest
+let blinds_mode = latest
     input_button.blinds_auto   -> "auto"
     manual(cover.blinds)       -> "manual"     # a manual change sticks until "auto" is pressed
     else                       -> "auto"
@@ -315,36 +355,44 @@ blinds_mode = latest
 | `toggle(x, initial: off)` | flips each time `x` happens, e.g. a button |
 | `count(x, 10min)` | how many times `x` happened in the last 10 min, e.g. triple-press detection. The runtime keeps this history itself, since HA only stores the latest. |
 
-All of these are persisted across restarts (§2).
+After a restart (§17):
+- `toggle()` is kept like a state machine;
+- `count()` only counts what happened since the restart;
+- `previous(x)` is `unknown` until `x` changes again.
 
 ---
 
 ## 11. Temporal sugar (D11)
 
-These are **defined as rewrites into core constructs**, not as separate features. Error messages
-and `ha_dsl.explain` can show the expansion.
+Sugar is **defined as a rewrite into core constructs**, not as a separate feature. Error
+messages and `ha_dsl.explain` can show the expansion.
 
 | Sugar | Expands to | Status |
 |---|---|---|
 | `x for D` | `x and age(x) >= D` | **Decided** |
-| `a until b` | a `latest` block with arms `a -> true`, `b -> false`, `else -> false` | Proposed |
-| `x debounced D` | the binding writes only once the value has been stable for D: `age(value) >= D` | Proposed |
+| `with override D:` | adds `age(manual(target)) < D -> keep` as the first arm of each binding inside (§15) | **Decided** |
 
 ```python
-light.porch = lux < 20 for 5min                  # = lux < 20 and age(lux < 20) >= 5min
-fan.bedroom = co2 > 800 until co2 < 700          # latch: on above 800, off below 700
+light.porch := lux < 20 for 5min                 # = lux < 20 and age(lux < 20) >= 5min
+```
 
-# `until` written out:
-fan.bedroom = latest
-    co2 > 800                  -> on
-    co2 < 700                  -> off
+Hysteresis needs no sugar; it's a `latest` block:
+```python
+fan.bedroom := latest
+    co2 > 800                  -> on             # on above 800…
+    co2 < 700                  -> off            # …off below 700
     else                       -> off
 ```
 
-- **Debounce:** block form `with debounce 2min:` (every binding inside), or per binding:
-  `switch.dehumidifier = humidity > 60% debounced 2min`.
-- **Equipment protection** (Proposed): `with min_on 5min, min_off 3min:` for compressors and
-  pumps.
+### Maybe later
+
+Possible sugar, **not planned for v1**. We'll add these only if real rules keep needing them:
+
+| Sugar | Would expand to |
+|---|---|
+| `a until b` (latch) | a `latest` block with arms `a -> true`, `b -> false`, `else -> false` |
+| `x debounced D` / `with debounce D:` | write only once the result has been stable for D (`age(result) >= D`) |
+| `with min_on D1, min_off D2:` | equipment protection: once switched, stay in that state at least this long |
 
 ---
 
@@ -352,9 +400,9 @@ fan.bedroom = latest
 
 Time-of-day **ranges** are bool signals:
 ```python
-night   = now in 22:00..06:00              # wraps midnight
-evening = now in sunset - 30min..23:00
-workday = today in mon..fri and not binary_sensor.holiday
+let night   = now in 22:00..06:00              # wraps midnight
+let evening = now in sunset - 30min..23:00
+let workday = today in mon..fri and not binary_sensor.holiday
 ```
 
 A time on its own, where a condition is expected, is a **time point**: a timestamp signal whose
@@ -390,7 +438,7 @@ In TEA terms, a state machine is the **model + `update`** and bindings are the *
 logic lives in the machine; what each device does lives in ordinary cascades that read it:
 
 ```python
-fan.bathroom =
+fan.bathroom :=
     bath_mode == "boost"   -> on
     bath_mode == "off"     -> off
     else                   -> stuffy
@@ -448,10 +496,10 @@ state house = "home":
 - **Timeouts** are ordinary conditions: `bath_mode == "boost" for 1h`, or `age(house) > 4h`.
 - **Chains:** if a transition makes another arm match, it is applied too. The same value
   appearing twice in one step is a loop, which is reported as an error, and the machine stops.
-- **Restarts need no special rules.** Everything is computed from persisted values and change
-  times, so after a restart the arms are simply re-evaluated. A button press or a 07:00 that
-  happened while HA was down, but after entering the state, is still `fresh`. Changes to bool
-  inputs during the downtime are dated to the restart.
+- **Restarts** (§17): the machine's value and change time are restored from its `select` entity,
+  and the arms are re-evaluated. Arms on exact timestamps still work: a 07:00 that passed while HA
+  was down, after entering the state, is still `fresh`. Arms on bool conditions whose change time
+  is from before the restart are `unknown` until those conditions change again.
 
 ### D20. `fresh(x)` (Decided)
 
@@ -553,14 +601,14 @@ supports a `tag` (a newer notification replaces the old one) and `clear_notifica
 notification could be a binding, React-style:
 
 ```python
-notify.mobile_app_phone =
+notify.mobile_app_phone :=
     washer == "done"      -> "Washing is done"
     else                  -> none
 ```
 
 This sends the message when the value changes to it, and **clears it from the phone** when it goes
-back to `none` (here, when the washer leaves `done`). Restarts are handled by the same
-"write only on change" rule as other bindings. It doesn't cover true one-offs (a ding per
+back to `none` (here, when the washer leaves `done`). Restarts are handled by the same rules as
+other bindings (§17). It doesn't cover true one-offs (a ding per
 doorbell press, TTS, `flash()`), so `on` would remain for those.
 
 **Decided:** `on x [if g]:` is the single effect construct. Whether to *also* add declarative
@@ -568,8 +616,8 @@ notification targets, and in which version, is still open (D22).
 
 ### Other details (Decided)
 
-- **Restart catch-up is automatic,** because "last handled" is persisted. Skip occurrences more
-  than 1h old (configurable), since a notification six hours late is usually noise.
+- **After a restart, everything that happened before it counts as handled** (§17). There's no
+  catch-up in v1. (This replaces the earlier "catch up, capped at 1h", which needed persistence.)
 - On first load, "last handled" starts at "now", so nothing from the past fires.
 - Service calls are written `domain.service(arg: value)`, or `entity.service(…)` to set the
   target.
@@ -590,7 +638,7 @@ fights a manual change in between.
 For a time limit, use `manual()` and `keep` (no new concepts):
 
 ```python
-fan.bathroom =
+fan.bathroom :=
     age(manual(fan.bathroom)) < 1h   -> keep      # yield for an hour after a manual change
     else                             -> stuffy
 ```
@@ -598,9 +646,9 @@ fan.bathroom =
 …with sugar for the common cases:
 ```python
 with override 1h:            # same as above, for every binding in the block
-    fan.bathroom = stuffy
+    fan.bathroom := stuffy
 with override never:         # re-assert immediately (e.g. pumps, safety rules)
-    switch.pump = pressure < 2
+    switch.pump := pressure < 2
 ```
 
 When the hour is up, the `keep` arm stops matching. The binding's value changes, so it writes
@@ -655,14 +703,62 @@ Known limits:
 
 ---
 
-## 17. Startup and restarts: D17 (Decided)
+## 17. Startup and restarts: D17 (Proposed, revised)
 
-- Wait for HA's `started` event, then evaluate everything.
-- Write only where the result differs from the **persisted last-written value**. A restart is
-  then a no-op unless the inputs changed while HA was down, and it doesn't undo manual changes
-  made before the restart.
-- Wake-ups for `age()` comparisons are recomputed from persisted change times.
-- State machines and actions catch up automatically (D13b, §14).
+Restarts are rare, so v1 aims for behaviour that is **predictable and never surprising**, not
+exact catch-up. **Principle: a restart never moves a device by itself.**
+
+**What survives a restart without any storage of ours:**
+- **Timestamp entities** (`event.*`, `input_button.*`, `button.*`): their state *is* the time,
+  so `age()`, `latest` and `fresh()` on them stay exact.
+- **Time points** (`07:00`, `sunset`): computed from the clock.
+- **State machines:** HA restores their `select` entity, including its change time. After a
+  crash it can be up to ~15 minutes stale, since HA saves restore state periodically.
+- **Current entity states:** HA re-reads them from the devices.
+
+**What's lost:**
+- the change times of everything else (HA resets `last_changed` to the boot time);
+- `manual()` history;
+- what we last wrote.
+
+**Rules:**
+
+1. **Wait for HA's `started` event,** then evaluate everything.
+2. **Change times from before the restart mean "some time before the restart".** `age(x)` is
+   then only known to be *at least* the time since boot. Comparisons that this settles are
+   definite; the rest are `unknown` (D16) until they can be decided. For example:
+   - `age(x) > 1h`, two hours after boot: true;
+   - `age(x) < 10min`: `unknown` for the first 10 minutes, then false;
+   - `x for 10min`: `unknown` for the first 10 minutes. The `for` simply waits its full duration
+     again;
+   - `fresh(x)`, for a bool `x` that hasn't changed since boot: `unknown`, so the arm doesn't
+     fire;
+   - `latest`: anything that happened after boot beats anything from before it. Two pre-restart
+     occurrences can't be ordered, so the result is `unknown`.
+
+   So `light.hall := motion or age(motion) < 10min` doesn't switch the light on after a reboot.
+3. **Each binding adopts its first definite result after a restart without writing it.** Writes
+   resume on the next change of that result. This means:
+   - a device that should have changed while HA was down catches up at the next relevant change,
+     not at boot;
+   - a manual change made before the restart survives it until the rule's result next changes;
+   - a timed override (`age(manual(x)) < 1h -> keep`) becomes "until the next change".
+4. **Actions treat everything before the restart as handled.** No catch-up.
+5. **State machines** keep their restored value and re-evaluate (§13). A 07:00 transition missed
+   during downtime still happens at boot. Arms on bool conditions wait until those conditions
+   change again.
+
+**Things we could add later, each on its own, if reboots turn out to matter more:**
+- persist `manual()` timestamps, so timed overrides survive restarts;
+- persist each action's last-handled time, for capped catch-up of missed actions;
+- persist last-written values, so bindings can re-sync at boot when an input changed during the
+  downtime;
+- read change times from HA's recorder, when it's enabled and keeps the entity, for exact `age()`.
+
+Earlier approvals that this replaces:
+- D13b's "restarts just re-evaluate with persisted change times";
+- D14's 1h catch-up;
+- the old D17 ("write only if different from the persisted last-written value").
 
 ---
 
@@ -672,7 +768,7 @@ Repeated patterns, like one fan rule per bathroom:
 
 ```python
 def bath_fan(fan, co2, humidity, remote):
-    fan = …                       # a template: expands at compile time
+    fan := …                      # a template: expands at compile time
 bath_fan(fan.main_bath, sensor.main_co2, sensor.main_humidity, event.main_remote)
 bath_fan(fan.guest_bath, …)
 ```
@@ -707,7 +803,7 @@ with no runtime cost. Leaving this out of v1 is fine.
 | `or` | |
 | `and` | |
 | `not` | |
-| `for`, `until`, `debounced` (sugar, §11) | `not motion for 5min` = `not (motion for 5min)` |
+| `for` (sugar, §11) | `not motion for 5min` = `not (motion for 5min)` |
 | `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`, `??` | |
 | `+`, `-` | |
 | `*`, `/` | |
@@ -721,14 +817,18 @@ So `co2 > 800 for 5min or humidity > 60%` means `(co2 > 800 for 5min) or (humidi
 
 ```python
 # bathroom.hdsl
-co2      = sensor.bathroom_co2
-humidity = sensor.bathroom_humidity
-remote   = event.bathroom_remote
-window   = binary_sensor.bathroom_window
-motion   = binary_sensor.bathroom_motion
+let co2      = sensor.bathroom_co2
+let humidity = sensor.bathroom_humidity
+let remote   = event.bathroom_remote
+let window   = binary_sensor.bathroom_window
+let motion   = binary_sensor.bathroom_motion
 
-stuffy = (co2 > 800 until co2 < 700) or humidity > 70% for 2min
-night  = now in 22:00..07:00
+let co2_high = latest                 # hysteresis: on above 800, off below 700
+    co2 > 800                         -> true
+    co2 < 700                         -> false
+    else                              -> false
+let stuffy   = co2_high or humidity > 70% for 2min
+let night    = now in 22:00..07:00
 
 state bath_mode = "auto":
     fresh(remote.long_press)            -> "off"
@@ -739,14 +839,14 @@ state bath_mode = "auto":
     bath_mode == "off" for 2h           -> "auto"
 
 with override 1h:
-    fan.bathroom =
+    fan.bathroom :=
         bath_mode == "boost"            -> on
         bath_mode == "off"              -> off
         window                          -> off
         night and not humidity > 85%    -> off
         else                            -> stuffy
 
-light.bathroom =
+light.bathroom :=
     motion or age(motion) < 5min        -> on(brightness: 10% if night else 100%)
     else                                -> off
 
@@ -762,31 +862,31 @@ on humidity > 90% for 30min:
 |---|---|---|---|
 | D0 | Name / file extension | Open | — |
 | D1 | Grammar base | **Decided** | custom Python-flavoured grammar, own parser |
-| D2 | Entity refs & aliases | Open (in discussion) | full ids + definitions as aliases; dotted = entity |
+| D2 | Names | **Decided** | `let name = expr` for aliases and computed values; `:=` binds; one namespace across files (proposed) |
 | D3 | Attributes / string states | **Decided** | `entity.attr`; quoted strings, `on`/`off` keywords |
 | D4 | Units & literals | **Decided** | `5min`, `50%`, `22:00`, `sunset - 30min` |
-| D5 | Binding operator & targets | **Decided** (one writer, `keep`) / Open (operator, writers) | `=`, per-domain writers, `on(attr: …)`, `keep` |
+| D5 | Bindings & targets | **Decided** (`:=`, one writer, `keep`) / Open (writers) | built-in writer table; lights bound as a whole; unsupported domains via actions in v1 |
 | D6 | Priority cascades | **Decided** | `cond -> value` arms, `\|` for guarded sub-arms, first match wins, `else` required in bindings |
 | D7 | Event sources | **Decided** | timestamp signals; table in §9 |
 | D8 | Event-type filter | **Decided** | `event.remote.double_press` |
 | D9 | Events | **Decided** | no event type: events are timestamp-valued state, as in HA |
 | D10 | Recency | **Decided** | `age(x)`: time since `x` last changed |
-| D11 | Temporal sugar | **Decided** (`for`) / Open (`until`, debounce, `min_on`) | `x for D` = `x and age(x) >= D`; `until` = two-arm `latest`; `debounced`, `min_on` |
+| D11 | Temporal sugar | **Decided** | `x for D` = `x and age(x) >= D`; `until`, debounce, `min_on` are "maybe later" |
 | D12 | Time | **Decided** | `now in 22:00..06:00` ranges; `fresh(07:00)`: a bare time is a time point |
 | D13a | State machine shape | **Decided (provisional)** | `state m = init:` + arms (TEA reducer); revisit after real use |
-| D13b | State machine semantics | **Decided** | arms are level-triggered conditions; chains with loop detection; restarts just re-evaluate |
+| D13b | State machine semantics | **Decided** | arms are level-triggered conditions; chains with loop detection; restarts per D17 |
 | D13c | Referring to states | **Decided** | string comparison, compile-time checked |
 | D13d | Visibility in HA | **Decided** | writable `select.ha_dsl_<name>` |
 | D13f | Reload & v2 deferrals | **Decided** | keep state across reloads if it still exists; nested states and extended state deferred to v2 |
-| D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; catch-up capped at 1h |
+| D14 | Actions / effects | **Decided** | `on x [if g]:` is the one effect construct, top-level only; once per occurrence; no catch-up after restarts (D17) |
 | D15 | Manual-override default | **Decided** | edge-triggered; `with override D` / `age(manual(x)) < D -> keep` |
 | D16 | Unknown handling | **Decided** | Kleene logic, unknown → keep, change times skip dropouts |
-| D17 | Startup | **Decided** | write only if different from persisted last value |
+| D17 | Restarts | Proposed (revised) | no storage of our own in v1; pre-restart change times are lower bounds; first result after boot adopted without writing |
 | D18 | Abstraction | **Decided: v2** | compile-time templates |
 | D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `cond -> value` arms |
 | D20 | "Since entering this state" | **Decided** | `fresh(x)`, only inside `state` blocks |
 | D21 | Manual-change detection | **Decided** | HA `Context` + differs from last write + not (un)availability; other automations count |
-| D22 | Declarative notifications | Open | `notify.x = <message or none>` bindings using tags/clear; v1 or v2 |
+| D22 | Declarative notifications | Open | `notify.x := <message or none>` bindings using tags/clear; v1 or v2 |
 
 ---
 
