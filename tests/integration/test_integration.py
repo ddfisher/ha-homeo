@@ -338,3 +338,70 @@ async def test_explain_service(hass: HomeAssistant, setup_homeo):
         await hass.services.async_call(
             DOMAIN, "explain", {"target": "fan.bathrom"}, blocking=True, return_response=True
         )
+
+
+async def test_editor_websocket_api(hass: HomeAssistant, setup_homeo, rules_dir, hass_ws_client):
+    hass.states.async_set("switch.pump", "off")
+    hass.states.async_set("binary_sensor.window", "off")
+    async_mock_service(hass, "switch", "turn_on")
+    async_mock_service(hass, "switch", "turn_off")
+    entry = await setup_homeo(
+        {"pump.homeo": "switch.pump := binary_sensor.window\n", "broken.homeo": "let x =\n"}
+    )
+    client = await hass_ws_client(hass)
+
+    async def ws(msg: dict) -> dict:
+        await client.send_json_auto_id(msg)
+        return await client.receive_json()
+
+    r = await ws({"type": "homeo/files"})
+    assert r["success"]
+    assert r["result"]["files"] == [
+        {"name": "broken.homeo", "loaded": False, "errors": 1},
+        {"name": "pump.homeo", "loaded": True, "errors": 0},
+    ]
+
+    r = await ws({"type": "homeo/file/read", "name": "pump.homeo"})
+    assert r["result"]["text"] == "switch.pump := binary_sensor.window\n"
+    r = await ws({"type": "homeo/file/read", "name": "../configuration.yaml"})
+    assert not r["success"] and r["error"]["code"] == "invalid_format"
+
+    # check: compiles without loading, against the other files
+    r = await ws({"type": "homeo/file/check", "name": "new.homeo", "text": "switch.pump := on\n"})
+    (d,) = r["result"]["diagnostics"]
+    assert d["severity"] == "error"
+    assert d["message"] == "`switch.pump` is already bound in pump.homeo"
+    assert (d["line"], d["col"]) == (1, 1)
+    r = await ws({"type": "homeo/file/check", "name": "pump.homeo", "text": "switch.pump := on\n"})
+    assert r["result"]["diagnostics"] == []
+    assert "new.homeo" not in {
+        f["name"] for f in (await ws({"type": "homeo/files"}))["result"]["files"]
+    }
+
+    # save: writes and reloads right away
+    r = await ws({"type": "homeo/file/save", "name": "broken.homeo", "text": "let x = on\n"})
+    assert r["result"] == {"loaded": True, "diagnostics": []}
+    assert (rules_dir / "broken.homeo").read_text() == "let x = on\n"
+    assert "broken.homeo" in entry.runtime_data.programs
+    r = await ws({"type": "homeo/file/save", "name": "pump.homeo", "text": "switch.pump := nope\n"})
+    assert r["result"]["loaded"] is False
+    assert "nope" in r["result"]["diagnostics"][0]["message"]
+
+    r = await ws({"type": "homeo/explain", "target": "switch.pump"})
+    assert r["result"]["explanations"][0]["binding"] == "switch.pump"  # the old version runs
+
+    r = await ws({"type": "homeo/file/delete", "name": "broken.homeo"})
+    assert r["success"]
+    assert not (rules_dir / "broken.homeo").exists()
+    assert "broken.homeo" not in entry.runtime_data.programs
+
+
+async def test_editor_websocket_api_needs_admin(
+    hass: HomeAssistant, setup_homeo, hass_ws_client, hass_admin_user
+):
+    await setup_homeo({})
+    hass_admin_user.groups = []  # no longer an admin
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({"type": "homeo/files"})
+    r = await client.receive_json()
+    assert not r["success"] and r["error"]["code"] == "unauthorized"

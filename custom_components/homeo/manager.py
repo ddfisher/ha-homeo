@@ -60,6 +60,27 @@ def _read_rule_files(directory: Path) -> dict[str, RuleFile]:
     return out
 
 
+def _read_text(path: Path) -> str | None:
+    """Runs in the executor."""
+    try:
+        return path.read_text("utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def _write_text(path: Path, text: str) -> None:
+    """Runs in the executor. Writes atomically, so the watcher never sees half a file."""
+    path.parent.mkdir(exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, "utf-8")
+    tmp.replace(path)
+
+
+def _delete(path: Path) -> None:
+    """Runs in the executor."""
+    path.unlink(missing_ok=True)
+
+
 def issue_id(file: str) -> str:
     return ISSUE_PREFIX + re.sub(r"[^a-z0-9_]", "_", file.lower())
 
@@ -75,6 +96,7 @@ class HomeoManager:
         self.programs: dict[str, Program] = {}
         self.sources: dict[str, str] = {}  # the text each running program was compiled from
         self.errors: dict[str, list[Diagnostic]] = {}
+        self.globals = Globals()  # what the running files define, for checking an edited file
         self.add_select_entities: Callable[[list[Any]], None] | None = None
         self.machine_entities: dict[str, MachineSelect] = {}
         self._unsubs: list[Callable[[], None]] = []
@@ -225,6 +247,7 @@ class HomeoManager:
             if name not in files:
                 self.clear_report(name)
         self.sources = sources
+        self.globals = g
         return programs
 
     def apply(self, programs: dict[str, Program]) -> None:
@@ -255,6 +278,41 @@ class HomeoManager:
     def clear_report(self, file: str) -> None:
         if self.errors.pop(file, None) is not None:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id(file))
+
+    # ----------------------------------------------------------------- files
+
+    def check_text(self, name: str, text: str) -> list[Diagnostic]:
+        """Compile `text` as file `name` without loading it: its errors and warnings, against
+        the other running files (for the editor panel)."""
+        try:
+            program, _ = check(parse(text, name), self.host, self.globals)
+        except CompileError as err:
+            return err.diagnostics
+        return list(program.warnings)
+
+    async def async_list_files(self) -> list[dict[str, Any]]:
+        files = await self.hass.async_add_executor_job(_read_rule_files, self.directory)
+        return [
+            {
+                "name": name,
+                "loaded": name in self.programs,
+                "errors": len(self.errors.get(name, [])),
+            }
+            for name in sorted(files)
+        ]
+
+    async def async_read_file(self, name: str) -> str | None:
+        path = self.directory / name
+        return await self.hass.async_add_executor_job(_read_text, path)
+
+    async def async_save_file(self, name: str, text: str) -> None:
+        """Write a rule file and reload now (the watcher's reload would come later)."""
+        await self.hass.async_add_executor_job(_write_text, self.directory / name, text)
+        await self.async_reload()
+
+    async def async_delete_file(self, name: str) -> None:
+        await self.hass.async_add_executor_job(_delete, self.directory / name)
+        await self.async_reload()
 
     # --------------------------------------------------------------- explain
 

@@ -30,6 +30,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HomeoConfigEntry) -> boo
     from homeassistant.helpers import config_validation as cv
 
     from .manager import HomeoManager
+    from .panel import async_register_panel
+    from .websocket import async_register as async_register_websocket
 
     manager = HomeoManager(hass, entry)
     entry.runtime_data = manager
@@ -48,6 +50,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HomeoConfigEntry) -> boo
         supports_response=SupportsResponse.ONLY,
     )
     entry.async_on_unload(entry.add_update_listener(_options_updated))
+    async_register_websocket(hass)
+    await async_register_panel(hass)
     return True
 
 
@@ -56,6 +60,9 @@ async def _options_updated(hass: HomeAssistant, entry: HomeoConfigEntry) -> None
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: HomeoConfigEntry) -> bool:
+    from .panel import async_unregister_panel
+
+    async_unregister_panel(hass)
     await entry.runtime_data.async_stop()
     hass.services.async_remove(DOMAIN, "reload")
     hass.services.async_remove(DOMAIN, "explain")
