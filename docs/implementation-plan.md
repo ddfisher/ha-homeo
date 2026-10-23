@@ -100,9 +100,15 @@ This one representation gives three things the design asks for, with no special 
   `age(x) < 10min` is unknown for 10 minutes, then false. `latest` and `fresh()` compare
   intervals the same way, so two pre-boot times can't be ordered (unknown) while a post-boot
   time beats any pre-boot one.
-- **Partial knowledge at load.** HA's `last_changed` is exact when it's later than boot (it can
-  only come from a real change), so entity state cells start with an exact change time in that
-  case. Attributes only know "at or before `last_updated`": `(−∞, last_updated]`.
+- **Partial knowledge at load.** At load, an entity's change time is only known to be *at or
+  before* HA's `last_changed`: `(−∞, last_changed]` (attributes: `(−∞, last_updated]`).
+  `last_changed` can't be trusted as exact even when it's after boot, because an integration
+  reconnecting after boot (`unavailable → off`) looks like a fresh change and would, say, switch
+  on a motion light via `age(motion) < 10min`. A derived expression only changes when one of its
+  inputs does, so its change time is bounded by its inputs' latest change time (this is how
+  `bath_mode == "boost" for 30min` keeps working across a restart: the machine's change time
+  is restored exactly). The first known value of a cell that was unavailable at load gets
+  `(−∞, now]`.
 
 A bound of `−∞` together with a `maybe_never` flag represents "never happened, or happened
 before we started watching" (e.g. a bool that is false at load). `latest` takes its `else` only
@@ -360,5 +366,35 @@ the HACS action.
 
 ## 6. Progress log
 
-- **Session 1:** research notes, this plan; started M1–M3 (see git history and test suite for
-  what's in).
+### Session 1
+
+Done (255 tests: 245 core, 10 integration):
+- **M1** lexer + parser (`core/lexer.py`, `core/parser.py`, `core/ast.py`, `core/printer.py`).
+  All complete examples in the design parse.
+- **M2** checker (`core/checker.py`, `core/ir.py`, `core/types.py`): every compile error the
+  design names, with hints; cross-file rules via `Globals`.
+- **M3** runtime (`core/runtime.py`, `core/values.py`, `core/timeutil.py`): cells, waves,
+  wake-ups, cascades, `latest`, history functions, machines, actions, bindings, manual
+  detection, restart and reload semantics. The §21 example runs through a scripted day.
+- **M4** writers (`core/writers.py`): the full v1 table with read-back tolerances.
+- **M5 (first version)**: config flow, `HassHost`, file polling with atomic reloads, repairs
+  issues, `select.homeo_*` entities with restore (value + change time), contexts, logbook
+  attribution, `homeo.reload`, dry-run option. Placeholder brand icon.
+
+Notes from implementation:
+- `manual(x)` starts as "never, or some time before load", so `age(manual(x)) < 1h` is unknown
+  (and falls through in cascades) for the first hour after a restart. This matches D17's
+  accepted cost (pre-restart manual changes aren't kept).
+- The "`else` required" rule applies to blocks written directly in a binding; a binding that
+  uses a `let` holding a `latest` without `else` gets `unknown` (→ keep) until a condition
+  happens.
+- A `latest` without `else` whose conditions all date from before load is `unknown` until one
+  of them happens (I1). In the §21 example, `co2_high` is unknown until co2 crosses 700 or 800,
+  as the design's comment says.
+
+Next:
+- M5 polish: `homeo.explain` hooks, diagnostics for entities that appear after load (rules
+  referencing entities from integrations that load late currently fail to compile until the
+  next reload; consider retrying on `EVENT_COMPONENT_LOADED`), stale `select` entity cleanup
+  tests, a LICENSE (owner's choice) and hassfest/HACS CI checks before a first release.
+- M6 tooling, M7 editor panel.

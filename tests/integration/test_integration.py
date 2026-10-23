@@ -1,0 +1,206 @@
+"""Integration tests against a real (test) Home Assistant."""
+
+from datetime import timedelta
+
+from homeassistant.core import Context, HomeAssistant, State
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import (
+    async_fire_time_changed,
+    async_mock_service,
+    mock_restore_cache_with_extra_data,
+)
+
+from custom_components.homeo.const import DOMAIN, EVENT_RULE_FIRED
+
+FAN = """
+fan.bathroom :=
+    age(manual(fan.bathroom)) < 1h      -> keep
+    else                                -> sensor.bathroom_co2 > 800
+"""
+
+
+async def test_binding_calls_service_with_our_context(hass: HomeAssistant, setup_homeo):
+    hass.states.async_set("sensor.bathroom_co2", "500", {"unit_of_measurement": "ppm"})
+    hass.states.async_set("fan.bathroom", "off")
+    turn_on = async_mock_service(hass, "fan", "turn_on")
+    fired = []
+    hass.bus.async_listen(EVENT_RULE_FIRED, fired.append)
+    await setup_homeo({"bathroom.homeo": "fan.bathroom := sensor.bathroom_co2 > 800\n"})
+
+    hass.states.async_set("sensor.bathroom_co2", "900", {"unit_of_measurement": "ppm"})
+    await hass.async_block_till_done()
+    assert len(turn_on) == 1
+    call = turn_on[0]
+    assert call.data["entity_id"] == "fan.bathroom"
+    assert fired and fired[0].context.id == call.context.id
+    assert fired[0].data["source"] == "bathroom.homeo:1"
+
+
+async def test_manual_detection_uses_context(hass: HomeAssistant, setup_homeo, freezer):
+    hass.states.async_set("sensor.bathroom_co2", "500", {"unit_of_measurement": "ppm"})
+    hass.states.async_set("fan.bathroom", "off")
+    turn_on = async_mock_service(hass, "fan", "turn_on")
+    turn_off = async_mock_service(hass, "fan", "turn_off")
+    entry = await setup_homeo({"bathroom.homeo": FAN})
+    manager = entry.runtime_data
+
+    # past the post-load uncertainty of manual()
+    freezer.tick(timedelta(hours=2))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    hass.states.async_set("sensor.bathroom_co2", "900", {"unit_of_measurement": "ppm"})
+    await hass.async_block_till_done()
+    assert len(turn_on) == 1
+    # the device reports back with our context: not manual
+    hass.states.async_set("fan.bathroom", "on", context=turn_on[0].context)
+    await hass.async_block_till_done()
+    manual = manager.runtime.cells["manual:fan.bathroom"].extra["t"]
+    assert manual.lo == float("-inf")
+
+    # a person turns it off (fresh context): manual, and the rule yields for an hour
+    hass.states.async_set("fan.bathroom", "off", context=Context(user_id="abc"))
+    await hass.async_block_till_done()
+    assert manager.runtime.cells["manual:fan.bathroom"].extra["t"].lo > 0
+    assert len(turn_off) == 0
+    freezer.tick(timedelta(minutes=61))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert len(turn_on) == 2  # re-synced after the hour
+
+
+async def test_compile_errors_create_issue_and_keep_old_rules(
+    hass: HomeAssistant, setup_homeo, rules_dir
+):
+    hass.states.async_set("switch.pump", "off")
+    hass.states.async_set("binary_sensor.window", "off")
+    turn_on = async_mock_service(hass, "switch", "turn_on")
+    async_mock_service(hass, "switch", "turn_off")
+    entry = await setup_homeo({"pump.homeo": "switch.pump := binary_sensor.window\n"})
+    manager = entry.runtime_data
+
+    (rules_dir / "pump.homeo").write_text("switch.pump := binary_sensor.windw\n")
+    await manager.async_reload()
+    issues = ir.async_get(hass)
+    issue = issues.async_get_issue(DOMAIN, "compile_error_pump_homeo")
+    assert issue is not None
+    assert "unknown entity `binary_sensor.windw`" in issue.translation_placeholders["errors"]
+
+    # old rules still run
+    hass.states.async_set("binary_sensor.window", "on")
+    await hass.async_block_till_done()
+    assert len(turn_on) == 1
+
+    (rules_dir / "pump.homeo").write_text("switch.pump := binary_sensor.window\n")
+    await manager.async_reload()
+    assert issues.async_get_issue(DOMAIN, "compile_error_pump_homeo") is None
+
+
+async def test_file_changes_are_picked_up_by_polling(
+    hass: HomeAssistant, setup_homeo, rules_dir, freezer
+):
+    hass.states.async_set("switch.pump", "off")
+    turn_on = async_mock_service(hass, "switch", "turn_on")
+    await setup_homeo({})
+    (rules_dir / "new.homeo").write_text("switch.pump := on\n")
+    freezer.tick(timedelta(seconds=3))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert len(turn_on) == 1
+
+
+MACHINE = """
+state bath_mode = "auto":
+    fresh(input_button.boost)
+        | bath_mode == "auto" -> "boost"
+        | else -> "auto"
+    bath_mode == "boost" for 30min -> "auto"
+"""
+
+
+async def test_state_machine_select_entity(hass: HomeAssistant, setup_homeo, freezer):
+    hass.states.async_set("input_button.boost", "unknown")
+    entry = await setup_homeo({"bath.homeo": MACHINE})
+    state = hass.states.get("select.homeo_bath_mode")
+    assert state is not None
+    assert state.state == "auto"
+    assert state.attributes["options"] == ["auto", "boost"]
+
+    freezer.tick(timedelta(seconds=1))  # the clock is frozen; press after entering "auto"
+    hass.states.async_set("input_button.boost", dt_util.utcnow().isoformat())
+    await hass.async_block_till_done()
+    assert hass.states.get("select.homeo_bath_mode").state == "boost"
+
+    # choosing an option in the UI drives the machine
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": "select.homeo_bath_mode", "option": "auto"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert entry.runtime_data.runtime.machine_value("bath_mode") == "auto"
+    assert hass.states.get("select.homeo_bath_mode").state == "auto"
+
+
+async def test_state_machine_restored_with_change_time(hass: HomeAssistant, setup_homeo, freezer):
+    hass.states.async_set("input_button.boost", "unknown")
+    entered = dt_util.utcnow() - timedelta(minutes=20)
+    mock_restore_cache_with_extra_data(
+        hass,
+        [
+            (
+                State("select.homeo_bath_mode", "boost"),
+                {"changed_at": entered.isoformat()},
+            )
+        ],
+    )
+    await setup_homeo({"bath.homeo": MACHINE})
+    assert hass.states.get("select.homeo_bath_mode").state == "boost"
+    freezer.tick(timedelta(minutes=10, seconds=1))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass.states.get("select.homeo_bath_mode").state == "auto"  # 30 min after entering
+
+
+async def test_dry_run_option(hass: HomeAssistant, setup_homeo, caplog):
+    hass.states.async_set("switch.pump", "off")
+    turn_on = async_mock_service(hass, "switch", "turn_on")
+    await setup_homeo({"pump.homeo": "switch.pump := on\n"}, options={"dry_run": True})
+    assert turn_on == []
+    assert "[dry run]" in caplog.text
+
+
+async def test_reload_service_and_unload(hass: HomeAssistant, setup_homeo, rules_dir):
+    hass.states.async_set("switch.pump", "off")
+    turn_on = async_mock_service(hass, "switch", "turn_on")
+    entry = await setup_homeo({})
+    (rules_dir / "pump.homeo").write_text("switch.pump := on\n")
+    await hass.services.async_call(DOMAIN, "reload", blocking=True)
+    await hass.async_block_till_done()
+    assert len(turn_on) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert not hass.services.has_service(DOMAIN, "reload")
+
+
+async def test_time_points_fire(hass: HomeAssistant, setup_homeo, freezer):
+    await hass.config.async_set_time_zone("UTC")
+    freezer.move_to("2026-01-05 06:59:00+00:00")
+    calls = async_mock_service(hass, "notify", "phone")
+    await setup_homeo({"t.homeo": 'on 07:00:\n    notify.phone(message: "morning")\n'})
+    assert calls == []
+    freezer.move_to("2026-01-05 07:00:00+00:00")
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert len(calls) == 1 and calls[0].data == {"message": "morning"}
+
+
+async def test_config_flow_single_instance(hass: HomeAssistant):
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
+    assert result["type"] == "form"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] == "create_entry"
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
+    assert result["type"] == "abort"
