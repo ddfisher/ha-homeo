@@ -75,6 +75,11 @@ class Writer:
 # --------------------------------------------------------------------- on / off
 
 
+def _clean(x: float) -> float | int:
+    """Send integral numbers as ints (brightness_pct=100, not 100.0)."""
+    return int(x) if float(x).is_integer() else x
+
+
 def _pct_to_255(v: Any) -> float:
     return round(255 * _num(v) / 100)
 
@@ -128,7 +133,7 @@ LIGHT_PARAMS = {
         T.PERCENT,
         "brightness_pct",
         "brightness",
-        lambda v: round(_num(v), 2),
+        lambda v: _clean(round(_num(v), 2)),
         _pct_to_255,
         lambda s: 3,
     ),
@@ -236,8 +241,8 @@ def _str(v: Any) -> str:
     return v if isinstance(v, str) else str(v)
 
 
-def _float(v: Any) -> float:
-    return float(_num(v))
+def _float(v: Any) -> float | int:
+    return _clean(float(_num(v)))
 
 
 def _step_tol(attr: str, default: float):

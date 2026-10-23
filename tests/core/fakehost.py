@@ -34,6 +34,7 @@ class FakeHost:
         self.timers: list[tuple[float, int, list]] = []
         self.seq = itertools.count()
         self.calls: list[ServiceCall] = []
+        self.call_times: list[float] = []
         self.logs: list[tuple[str, str]] = []
         self.machines: dict[str, tuple[str, float, list[str]]] = {}
         self.restored: dict[str, tuple[str, float]] = {}
@@ -95,6 +96,7 @@ class FakeHost:
 
     def call_service(self, call: ServiceCall) -> None:
         self.calls.append(call)
+        self.call_times.append(self.t)
         if self.simulate_devices and call.entity_id:
             self.simulate(call)
 

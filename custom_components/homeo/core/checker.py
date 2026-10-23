@@ -1102,7 +1102,9 @@ class Checker:
                     'bind a cover either by "open"/"closed" or by `.position`, not both',
                 )
         value = self.resolve(stmt.value, _Ctx(where="binding"))
-        if isinstance(value, (ir.Cascade, ir.Latest)):
+        if isinstance(stmt.value, (A.Cascade, A.Latest)) and isinstance(
+            value, (ir.Cascade, ir.Latest)
+        ):
             last = value.arms[-1] if value.arms else None
             if not (isinstance(last, ir.ArmIR) and last.cond is None):
                 self.error(
