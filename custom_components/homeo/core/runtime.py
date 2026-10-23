@@ -62,6 +62,9 @@ class _Nothing:
 NOTHING = _Nothing()  # "no known value yet"
 NOMATCH = object()  # no arm matched
 MAX_SETTLE_ROUNDS = 100
+# A timestamp replaced up to this long before its time still happened (I23): the device's
+# clock (a phone's next alarm) may run slightly ahead of HA's.
+CLOCK_GRACE = 1.0
 
 
 def maybe_before(t: float) -> Num:
@@ -263,6 +266,11 @@ class Runtime:
                     # Dry run turned off: nothing was really written, so bring the device in
                     # line once, as for a new binding (its state stands in, D16).
                     s.last_known = NOTHING
+                if s.dry_run and not old.dry_run:
+                    # Dry run turned on: homeo writes nothing from now on, so there are no
+                    # late reports of its writes to tell apart from a person's changes; the
+                    # last real write would only hide a change back to it (D21 rule 2).
+                    s.last_written = NOTHING
             else:
                 s.last_handled = self.now
 
@@ -521,18 +529,24 @@ class Runtime:
     def _recompute(self, rc: RCell) -> bool:
         self._cur_wake = INF
         v = self._compute(rc)
+        before = rc.known
         changed = self._set(rc, v)
-        changed = self._update_occurrence(rc) or changed
+        replaced = before if rc.known is not before else NOTHING
+        changed = self._update_occurrence(rc, replaced) or changed
         rc.wake = self._cur_wake
         self._push_wake(rc)
         return changed
 
-    def _update_occurrence(self, rc: RCell) -> bool:
+    def _update_occurrence(self, rc: RCell, replaced: Any = NOTHING) -> bool:
         """Timestamps: t(x) is the most recent value at or before now. A value in the future
         (a next-alarm sensor, `sensor.alarm - 30min`) happens when its time comes, so wake up
         then. Until a value has been seen to pass, the last occurrence is only known to be
-        before now (as for change times from before a restart, D17). Returns whether t(x)
-        changed."""
+        before now (as for change times from before a restart, D17).
+
+        `replaced` is the value this update replaced. If its time had come, it happened, even
+        when the update arrives before our wake-up for it has run (HA runs callbacks due at
+        the same instant in any order); if its time was at most CLOCK_GRACE away, it happened
+        now (the device's clock is ahead of HA's). Returns whether t(x) changed."""
         if rc.defn.type != T.TIMESTAMP:
             return False
         old = rc.extra.get("occ")
@@ -544,6 +558,14 @@ class Runtime:
         else:
             self._wake_at(v.hi)
             occ = old if old is not None and old.hi <= self.now else maybe_before(self.now)
+        if isinstance(replaced, Num):
+            happened = None
+            if replaced.hi <= self.now:
+                happened = replaced
+            elif replaced.lo == replaced.hi <= self.now + CLOCK_GRACE:
+                happened = Num.of(self.now)
+            if happened is not None and happened.lo > occ.hi:
+                occ = happened
         rc.extra["occ"] = occ
         return occ != old
 

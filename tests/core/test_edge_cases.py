@@ -331,6 +331,39 @@ def test_past_occurrence_is_remembered_when_the_value_moves_on():
     assert r.new_calls() == ["switch.turn_off switch.pump"]
 
 
+def test_alarm_replaced_before_our_wake_up_runs_still_happened():
+    """HA runs callbacks due at the same instant in any order: the sensor may move on to
+    tomorrow's alarm before homeo's own wake-up for today's has run."""
+    h = alarm_world(at=DEFAULT_T + H)
+    r = Rig('on sensor.next_alarm:\n    notify.mobile_app_phone(message: "wake up")', host=h)
+    h.t = DEFAULT_T + H + 0.05  # the alarm time has passed; the wake-up hasn't run yet
+    h.set_state("sensor.next_alarm", h.iso(DEFAULT_T + 25 * H), ALARM)
+    assert r.new_calls() == ["notify.mobile_app_phone message=wake up"]
+    assert r.rt.cells["state:sensor.next_alarm"].occurrence().lo == DEFAULT_T + H
+    h.advance(1)
+    assert r.new_calls() == []  # the wake-up, when it runs, doesn't fire it again
+
+
+def test_alarm_replaced_within_a_second_of_its_time_happened_now():
+    """The phone's clock may be slightly ahead of HA's (CLOCK_GRACE): it happened when the
+    replacement arrived, so `age()` is never negative."""
+    h = alarm_world(at=DEFAULT_T + H)
+    r = Rig('on sensor.next_alarm:\n    notify.mobile_app_phone(message: "wake up")', host=h)
+    h.advance(H - 0.5)
+    h.set_state("sensor.next_alarm", h.iso(DEFAULT_T + 25 * H), ALARM)
+    assert r.new_calls() == ["notify.mobile_app_phone message=wake up"]
+    assert r.rt.cells["state:sensor.next_alarm"].occurrence().lo == h.t
+
+
+def test_alarm_replaced_more_than_a_second_early_was_moved():
+    h = alarm_world(at=DEFAULT_T + H)
+    r = Rig('on sensor.next_alarm:\n    notify.mobile_app_phone(message: "wake up")', host=h)
+    h.advance(H - 2)  # dismissed or moved just before it rang
+    h.set_state("sensor.next_alarm", h.iso(DEFAULT_T + 25 * H), ALARM)
+    h.advance(10)
+    assert r.new_calls() == []
+
+
 def test_never_happened_timestamp_is_still_never():
     r = Rig("switch.pump := age(input_button.boost) > 1h")  # never pressed
     assert r.rt.cells["state:input_button.boost"].occurrence().hi == -INF
@@ -371,6 +404,25 @@ switch.pump :=
     r.h.set_state("sensor.bathroom_co2", "900")  # would switch on
     r.h.advance(5)
     r.h.set_state("switch.pump", "on")  # a person switches it on
+    assert r.rt.cells["manual:switch.pump"].extra["t"].lo == r.h.t
+
+
+def test_entering_dry_run_forgets_the_last_real_write():
+    """D21 rule 2 tells late reports of homeo's writes from a person's changes. Dry run
+    writes nothing, so a person setting the device back to homeo's last real value is a
+    manual change too."""
+    rules = """switch.pump :=
+    age(manual(switch.pump)) < 1h -> keep
+    else                         -> sensor.bathroom_co2 > 800
+"""
+    r = Rig(rules)
+    r.h.set_state("sensor.bathroom_co2", "900")
+    assert r.new_calls() == ["switch.turn_on switch.pump"]  # a real write: on
+    r.reload("# mode: dry_run\n" + rules)
+    r.h.advance(5)
+    r.h.set_state("switch.pump", "off")  # a person
+    r.h.advance(5)
+    r.h.set_state("switch.pump", "on")  # a person, back to homeo's last real write
     assert r.rt.cells["manual:switch.pump"].extra["t"].lo == r.h.t
 
 

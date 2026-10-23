@@ -345,8 +345,10 @@ keeps going after an error where it can).
 **I20. Dry run.** A `# mode: dry_run` directive (or the integration option "dry run all files")
 makes writes and actions log at INFO (`[dry run] would call light.turn_on {...}`) instead of
 calling services. Bindings still update `last_known_result` as if they had written, so dry run
-logs only changes, but not `last_written` (nothing was written, so a person's change is judged
-manual as usual, D21). When dry run is turned off (directive removed, option cleared), each
+logs only changes, but not `last_written`. When dry run is turned on, each binding forgets its
+last real write too: D21 rule 2 (a change back to what homeo last wrote isn't manual) exists to
+recognise late reports of homeo's writes, and dry run writes nothing, so it would only hide a
+person's change back to that old value. When dry run is turned off (directive removed, option cleared), each
 binding forgets its last result, so the device's state stands in and the device is brought in
 line once, as for a new binding (D16).
 
@@ -358,6 +360,16 @@ that passed. Until one has been seen to pass (e.g. right after loading), the las
 "some time before now", as for change times from before a restart (I1), so `age(x) < 10min` is
 unknown for 10 minutes, then false. The value itself is unchanged: `sensor.next_alarm - now`
 still reads the future time.
+
+A value that is replaced once its time has come happened, even if the update arrives before
+homeo's own wake-up for it has run: HA runs callbacks due at the same instant in any order, and
+a phone moves its next-alarm sensor on as the alarm rings. A value replaced at most 1 s before
+its time also happened, at the moment it was replaced, since the device's clock may be slightly
+ahead of HA's. Earlier than that, it was moved (or dismissed), not reached. So
+`on sensor.next_alarm:` follows HA's clock; for a device whose clock is further off, use an
+event from the device itself if it has one. Other wake-ups (`for`, `age()` thresholds, time
+points) can still race a state change by a few milliseconds; that's within what sensors can
+resolve anyway.
 
 **I21. `homeo.explain`** (§19) is a service that returns a response (Developer tools → Actions
 shows it as YAML; automations can use it too). Its `target` is a binding target

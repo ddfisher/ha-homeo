@@ -191,7 +191,7 @@ rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts ar
 | I20 | Dry run | `# mode: dry_run` directive or an integration option; logs would-be calls. Turning it off brings devices in line once, as for a new binding |
 | I21 | `homeo.explain` | A service with a response; target = binding target, entity, machine or `let` name; per arm: condition value, subexpression values (sugar expanded, `let` names kept), active arm; plus summary, device state, last write |
 | I22 | Editor panel | CodeMirror 6, bundled into one committed module (HACS ships only `custom_components/homeo/`); admin-only websocket API (`homeo/files`, `files/subscribe`, `file/read`, `file/check`, `file/save`, `file/delete`, `explain`); errors checked as you type against the other running files; save reloads at once; Explain follows the cursor; unsaved edits kept across pages; saves refuse to overwrite edits made elsewhere |
-| I23 | Future timestamps | `t(x)` is the most recent value at or before now; a future value happens when its time comes. Before one has been seen to pass, the last occurrence is "some time before now" (as for pre-restart times), so `age(x)` is a lower bound |
+| I23 | Future timestamps | `t(x)` is the most recent value at or before now; a future value happens when its time comes. Before one has been seen to pass, the last occurrence is "some time before now" (as for pre-restart times), so `age(x)` is a lower bound. A value replaced once its time has come (or at most 1 s before, for clock skew) happened |
 
 ### Repository state
 
