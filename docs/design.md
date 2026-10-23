@@ -1,5 +1,21 @@
 # Homeo: language design
 
+**What this is.** Homeo lets Home Assistant (HA) users write automations as declarative rules,
+describing *what each device should be given the state of the world*, instead of HA's YAML
+trigger/condition/action automations. For example:
+
+```python
+fan.bathroom := co2 > 800 or humidity > 60%
+```
+
+This keeps the fan in sync with that expression on every change. Homeo ships as a custom HA
+integration (installable via HACS). It watches `.homeo` rule files, compiles them inside HA, and
+drives devices through HA service calls.
+
+**How this document came about.** The project owner and Claude wrote it over a long design
+conversation. The owner made every decision in the log (§22). The repository contains only this
+document; implementation starts from scratch. Read "Handoff notes" below before starting.
+
 Status: **ready for implementation (v1).** Every decision has an ID (`D1`, `D2`, …) and is
 listed in the decision log (§22). Two are marked *provisional*, to revisit once real rules have
 been written: the state machine shape (D13a) and bare times as time points (D12). Alternatives we
@@ -30,6 +46,126 @@ and the integration's domain is `homeo`.
 6. tooling (`homeo.explain`, dry run);
 7. **finally:** an editor in HA's UI for `.homeo` files, with syntax highlighting and inline
    errors (§19).
+
+---
+
+## Handoff notes for implementers
+
+### Working with this document and the owner
+
+- **This document is the source of truth.** If implementation shows a decision doesn't work, or
+  you hit a gap in the spec, don't silently invent semantics. Choose the option most consistent
+  with the principles below, record it here (and in the decision log), and flag it to the owner.
+- **The owner's design preferences**, as observed during the design:
+  - **FRP / TEA / React mindset.** Rules describe values, not triggers. Effects are confined to
+    top-level `on` actions.
+  - **A small core.** Sugar is added only once real rules need it. Several sugar items were
+    deliberately deferred ("maybe later", §11); don't add them back unasked.
+  - **No special cases ("warts").** The owner prefers one general mechanism. For example, restart
+    behaviour falls out of unknown handling rather than special restart rules.
+  - **Restarts are rare.** Reasonable, predictable behaviour beats exact reconstruction.
+  - **Provisional decisions should stay cheap to change.** D13a (state machine shape) and D12
+    (bare times as time points) are to be revisited once real rules exist.
+
+### Why this architecture (rejected paths, briefly)
+
+- **pyscript (generating code for it):** pyscript runs `.py` files through its own AST
+  interpreter. Its `ast_compare` (`custom_components/pyscript/eval.py`) collapses every comparison
+  to a plain bool, so an operator-overloading library can't work there. Generating
+  decorator-based triggers would limit the semantics.
+- **AppDaemon:** real Python, but a separate process. Its state cache lags its own writes, it
+  restarts all apps on reconnect, and it needs a long-lived token.
+- **A plain Python library with operator overloading:** Python can't overload
+  `and`/`or`/`not`/`x if c else y`, and `&`/`|` have surprising precedence (`a > 1 | b > 2`
+  means `a > (1 | b) > 2`). Hence Homeo has its own syntax and parser.
+- **Custom integration (chosen):**
+  - in-process, real CPython;
+  - HA's own state-tracking helpers;
+  - native `Context` (needed for manual-change detection);
+  - `RestoreEntity`;
+  - HA's official test harness.
+
+### Home Assistant facts the design relies on
+
+Verify these against the current HA version when implementing.
+
+- **Event and button entities:**
+  - Event entities (`event.*`, HA 2023.8+) have the ISO timestamp of their last event as their
+    state, with an `event_type` attribute.
+  - `input_button.*` and `button.*` entities have the timestamp of their last press as their
+    state.
+- **Restarts:**
+  - `last_changed` resets to the boot time for most entities on restart.
+  - Restore state (`RestoreEntity`) is saved periodically (about every 15 minutes) and on a clean
+    shutdown. `async_get_last_state()` returns the stored `State`, including its `last_changed`.
+- **Context:** service calls run with a `homeassistant.core.Context` that we create. Entities
+  reuse a service call's context for state writes within a short window (5 s in HA's
+  `entity.py`); later reports get a fresh context. D21 rule 2 exists because of this.
+- **Useful APIs:**
+  - `async_track_state_change_event`;
+  - `async_track_point_in_time` / `async_call_later`;
+  - `hass.services.async_call(..., context=ctx)`;
+  - the issue registry, for repairs issues;
+  - `homeassistant.util.dt` for time.
+- **Don't block the event loop:** read rule files with `hass.async_add_executor_job`, and wait for
+  `EVENT_HOMEASSISTANT_STARTED` before evaluating rules.
+- **HACS:** the repository needs a `hacs.json` and the integration in `custom_components/homeo/`,
+  with a `manifest.json`.
+
+### Suggested code layout
+
+Not decided; adjust freely.
+
+- **A host-agnostic core package** (lexer, parser, checker, runtime) that imports nothing from HA.
+  Unit-test it with a fake host and a simulated clock. The host interface sketched during
+  prototyping was:
+  - `read(entity_id, attr)`;
+  - `write(target, value)`;
+  - `now()`;
+  - `schedule(when, callback)`;
+  - plus state-change notifications.
+- **`custom_components/homeo/`:**
+  - setup, file watching and reloads;
+  - the HA host adapter;
+  - writers;
+  - the `select` entities for state machines;
+  - later, the editor panel.
+- **Integration tests** with `pytest-homeassistant-custom-component`.
+
+### Spec gaps you'll need to settle
+
+These weren't discussed. Decide each one, document it here, and flag it to the owner.
+
+- **Lexical details:**
+  - identifiers, comments (`#`) and string escapes;
+  - tabs vs spaces;
+  - exact continuation rules: §8 says a more-indented line that doesn't start with `|` continues
+    the previous arm.
+- **Types and units:**
+  - numeric sensors with units other than `%`;
+  - the types of `now` and `today`;
+  - arithmetic between durations and timestamps.
+- **Glitch-free evaluation:** when one input change affects several signals, evaluate in
+  dependency order, so no binding or machine sees a half-updated state.
+- **`every D` and `count(x, D)`:**
+  - `every D`: aligned to the clock, or to load time?
+  - `count(x, D)`: precision of the time window.
+- **Writers:**
+  - read-back tolerances (brightness rounding, setpoints);
+  - what "matches" means for a multi-attribute `on(...)`.
+- **Clock edge cases:**
+  - daylight-saving changes for time points and ranges;
+  - `sunrise`/`sunset` while `sun.sun` is unavailable.
+- **Output details:** the wording of error messages, and the dry-run configuration format.
+
+### Repository state
+
+- **Repository name:** the GitHub repo is `ddfisher/ha-dsl`. The name predates "Homeo", and the
+  owner may rename it.
+- **Branches:** `main` holds only this document. Early prototypes (pyscript code generation, and a
+  Python operator-overloading library) were deleted. They survive only in the history of the
+  `claude/upbeat-hawking-3wnqwd` branch. They use superseded syntax and approaches; don't build
+  on them.
 
 ---
 
