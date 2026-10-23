@@ -422,7 +422,7 @@ Possible sugar, **not planned for v1**. We'll add these only if real rules keep 
 |---|---|
 | `with override D:` | adds `age(manual(target)) < D -> keep` as the first arm of each binding inside the block (§15) |
 | `with override never:` | a binding option rather than a rewrite: after a manual change, the binding writes its current result again straight away (pumps, safety rules) |
-| `a until b` (latch) | a `latest` block with arms `a -> true`, `b -> false`, `else -> false` |
+| `a until b` (latch) | a `latest` block with arms `a -> true`, `b -> false` and no `else` (`unknown` until either has happened) |
 | `x debounced D` / `with debounce D:` | write only once the result has been stable for D (`age(result) >= D`) |
 | `with min_on D1, min_off D2:` | equipment protection: once switched, stay in that state at least this long |
 
