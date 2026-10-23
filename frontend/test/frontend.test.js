@@ -143,7 +143,7 @@ test("explanation html", () => {
     ],
   });
   assert.match(html, /<span class="where">test\.homeo:5<\/span>/);
-  assert.doesNotMatch(html, /class="summary"/); // a binding's summary repeats what's below
+  assert.doesNotMatch(html, /class="summary"/); // the arms say the same
   assert.match(html, /<span class="mark no" title="differs from the result"/);
   assert.match(html, /<li class="arm active">/);
   assert.match(html, /<li class="arm idle">/);
@@ -166,7 +166,7 @@ test("explanation html: implicit else when no arm applies", () => {
   const machine = explanationHtml({ machine: "mode", state: "x", summary: "s", arms: groups });
   assert.match(machine, /<li class="arm active implicit">/);
   assert.ok(machine.includes(`else <span class="arrow">-&gt;</span>\u00a0keep`));
-  assert.match(machine, /<p class="summary">s<\/p>/); // machines keep their summary
+  assert.doesNotMatch(machine, /class="summary"/); // the arms say the same
   const let_ = explanationHtml({ let: "v", file: "f", value: "unknown", arms: groups });
   assert.ok(let_.includes(`else <span class="arrow">-&gt;</span>\u00a0unknown`));
   // an arm inside a group decides: no implicit else

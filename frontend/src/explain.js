@@ -95,9 +95,9 @@ export function explanationHtml(e) {
   const title = e.binding ?? e.machine ?? e.let;
   const kind = e.binding ? "binding" : e.machine ? "state machine" : "let";
   const where = e.rule ?? e.file;
-  // A binding's summary only repeats its result and deciding arm, shown below; keep it when
+  // The summary only repeats the result and the deciding arm, both shown below; keep it when
   // the result is unknown, where it says why.
-  const summary = e.binding && e.result !== "unknown" ? null : e.summary;
+  const summary = (e.result ?? e.state) === "unknown" ? e.summary : null;
   const facts = [];
   if ("result" in e) facts.push(["result", `<strong>${value(e.result)}</strong>`]);
   if ("value" in e) facts.push(["value", `<strong>${value(e.value)}</strong>`]);
