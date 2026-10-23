@@ -13,11 +13,13 @@ integration (installable via HACS). It watches `.homeo` rule files, compiles the
 drives devices through HA service calls.
 
 **How this document came about.** The project owner and Claude wrote it over a long design
-conversation. The owner made every decision in the log (§22). The repository contains only this
-document; implementation starts from scratch. Read "Handoff notes" below before starting.
+conversation. The owner made every decision in the log (§22). Read "Handoff notes" below before
+working on the code.
 
-Status: **ready for implementation (v1).** Every decision has an ID (`D1`, `D2`, …) and is
-listed in the decision log (§22). Two are marked *provisional*, to revisit once real rules have
+Status: **v1 implementation in progress.** Build steps 1–4 are done and step 5 has a first
+version; see "Implementation status" in `docs/implementation-plan.md` (§6) for what works, what
+was verified, and what's next. Every decision has an ID (`D1`, `D2`, …) and is listed in the
+decision log (§22). Two are marked *provisional*, to revisit once real rules have
 been written: the state machine shape (D13a) and bare times as time points (D12). Alternatives we
 compared are kept in the appendix.
 
@@ -112,9 +114,9 @@ Verify these against the current HA version when implementing.
 - **HACS:** the repository needs a `hacs.json` and the integration in `custom_components/homeo/`,
   with a `manifest.json`.
 
-### Suggested code layout
+### Code layout
 
-Not decided; adjust freely.
+As built, see `docs/implementation-plan.md` §1. The original suggestion, which it follows:
 
 - **A host-agnostic core package** (lexer, parser, checker, runtime) that imports nothing from HA.
   Unit-test it with a fake host and a simulated clock. The host interface sketched during
@@ -158,11 +160,43 @@ These weren't discussed. Decide each one, document it here, and flag it to the o
   - `sunrise`/`sunset` while `sun.sun` is unavailable.
 - **Output details:** the wording of error messages, and the dry-run configuration format.
 
+### Implementation decisions (gaps settled)
+
+Settled during implementation and reviewed by the owner: all accepted, except that restart
+handling was changed to follow D17 as written (I1 below reflects the change). Details and
+rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts are in
+`docs/research-notes.md`.
+
+| ID | Gap | Decision |
+|---|---|---|
+| I1 | Restart lower bounds, wake-ups | Time quantities are intervals that move with the clock; one mechanism gives exact wake-ups and D17's "at least since boot" bounds. Restart rules are exactly D17's: changes after boot are exact, earlier ones mean "some time before the restart", `manual()` starts as never happened |
+| I2 | Glitch-free evaluation | Waves in topological order; machines are sources and settle (chains) before bindings and actions run |
+| I3 | Ranges | `now in A..B` is true when `A` occurred more recently than `B` (start inclusive, end exclusive) |
+| I4 | DST | Non-existent wall times resolve to the first instant after the gap; ambiguous ones to the first occurrence |
+| I5 | `sunset` with `sun.sun` unavailable | Solar times are computed from HA's location (astral), not read from `sun.sun` |
+| I6 | `every D` | Aligned to local midnight (`every 15min` ticks at :00/:15/…) |
+| I7 | `count(x, D)` | Exact event timestamps, window `(now − D, now]` |
+| I8 | Machine states | Results must be string literals or `previous(self)`, so the state set is closed |
+| I9 | Lexical details | Identifiers as Python; segments after `.` may start with a digit; `#` comments; single-line strings with `\\ \" \' \n \t`; tabs in indentation are errors |
+| I10 | Continuation | More-indented lines not starting with `\|` continue the statement or arm (all statements, not only arms) |
+| I11 | Names vs domains | Local names shadow builtins, which shadow HA domains (needed for `let remote = …; remote.press`) |
+| I12 | `??` precedence | One level tighter than comparisons; comparisons don't chain |
+| I13 | `latest` with `\|` groups | Group competes by its guard's occurrence time; sub-arms are a first-match cascade |
+| I14 | Entity types | Inferred from domain, then attributes/current state; `any` when unsure |
+| I15 | Units | Only `%` is interpreted (scaled for light `brightness`); other units compare as plain numbers |
+| I16 | Time arithmetic | `ts − ts → duration`, `ts ± duration`, `time-of-day ± duration`; clock-moving values must be compared before use as results |
+| I17 | Cycles | `let` and binding cycles are errors (except via `manual()`); state machines break cycles |
+| I18 | Writer read-back | `on(...)` matches when every given parameter matches; per-attribute tolerances; transitional states match their goal; `text.*` accepted like `input_text.*` |
+| I19 | Error format | `file:line:col: error: …`, caret snippet, optional `hint:` |
+| I20 | Dry run | `# mode: dry_run` directive or an integration option; logs would-be calls |
+
 ### Repository state
 
 - **Repository name:** the GitHub repo is `ddfisher/ha-homeo` (formerly `ddfisher/ha-dsl`).
-- **Branches:** `main` holds only this document. Early prototypes (pyscript code generation, and a
-  Python operator-overloading library) were deleted. They survive only in the history of the
+- **Code:** `main` holds the implementation (`custom_components/homeo/`, tests in `tests/`),
+  this document, `docs/research-notes.md` and `docs/implementation-plan.md`.
+- **Old prototypes:** early prototypes (pyscript code generation, and a Python
+  operator-overloading library) survive only in the history of the
   `claude/upbeat-hawking-3wnqwd` branch. They use superseded syntax and approaches; don't build
   on them.
 

@@ -1,0 +1,34 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Homeo",
+        "description": "Homeo runs the rules in the `homeo` folder of your configuration directory (files ending in `.homeo`)."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Homeo is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "dry_run": "Dry run: log what the rules would do instead of doing it"
+        }
+      }
+    }
+  },
+  "issues": {
+    "compile_error": {
+      "title": "Errors in Homeo rules: {file}",
+      "description": "`{file}` couldn't be loaded. The previous version of the file keeps running until these are fixed:\n\n```\n{errors}\n```"
+    }
+  },
+  "services": {
+    "reload": {
+      "name": "Reload rules",
+      "description": "Re-reads all .homeo files now."
+    }
+  }
+}
