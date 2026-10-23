@@ -18,7 +18,7 @@ import {
 
 import { homeoCompletions } from "./complete.js";
 import { diagnosticsToCodeMirror } from "./diagnostics.js";
-import { explanationHtml, statementTarget } from "./explain.js";
+import { explanationHtml, prose, statementTarget } from "./explain.js";
 import { validFileName } from "./files.js";
 import { homeoHighlight, homeoLanguage } from "./language.js";
 import { STYLES } from "./styles.js";
@@ -593,7 +593,7 @@ class HomeoPanel extends HTMLElement {
         : "";
       html = note + result.explanations.map(explanationHtml).join("");
     } catch (err) {
-      html = `<p class="error">${escapeHtml(err.message ?? err)}</p>`;
+      html = `<p class="error">${prose(err.message ?? err)}</p>`;
       if (this.dirty || this.isNew) html += `<p class="hint">Save the file to explain your changes.</p>`;
     }
     if (seq === this.explainSeq) body.innerHTML = html;

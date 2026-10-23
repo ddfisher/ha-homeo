@@ -5,7 +5,7 @@ import { StringStream } from "@codemirror/language";
 import { Text } from "@codemirror/state";
 
 import { diagnosticsToCodeMirror } from "../src/diagnostics.js";
-import { statementTarget } from "../src/explain.js";
+import { explanationHtml, prose, statementTarget } from "../src/explain.js";
 import { validFileName } from "../src/files.js";
 import { homeoStream } from "../src/language.js";
 
@@ -120,4 +120,61 @@ test("file names: anything the integration loads, nothing outside the folder", (
   for (const bad of ["../x.homeo", "a/b.homeo", "a\\b.homeo", ".hidden.homeo", ".homeo", "x.txt", "a\0.homeo"]) {
     assert.ok(!validFileName(bad), bad);
   }
+});
+
+test("explain prose shows backtick spans as code, escaped", () => {
+  assert.equal(
+    prose("no binding named `a<b`; did you mean `fan.x`"),
+    "no binding named <code>a&#60;b</code>; did you mean <code>fan.x</code>",
+  );
+});
+
+test("explanation html", () => {
+  const html = explanationHtml({
+    binding: "fan.bathroom",
+    rule: "test.homeo:5",
+    result: "on",
+    summary: "fan.bathroom should be on, because `x > 1` (line 7)",
+    device: "off",
+    device_matches: false,
+    arms: [
+      { arm: "x > 1 -> on", line: 7, condition: true, active: true, values: { x: 2 } },
+      { arm: "else -> off", line: 8 },
+    ],
+  });
+  assert.match(html, /<span class="where">test\.homeo:5<\/span>/);
+  assert.doesNotMatch(html, /class="summary"/); // the arms say the same
+  assert.match(html, /<span class="mark no" title="differs from the result"/);
+  assert.match(html, /<li class="arm active">/);
+  assert.match(html, /<li class="arm idle">/);
+  assert.ok(html.includes(`x &#62; 1 <span class="arrow">-&gt;</span>\u00a0on`)); // wraps before `->` only
+  assert.match(html, /<code class="expr">x<\/code><span class="val">2<\/span>/);
+  assert.match(html, /checked top to bottom/);
+  assert.doesNotMatch(html, /implicit/); // it has an `else`
+});
+
+test("explanation html: unknown binding keeps its summary, with code", () => {
+  const html = explanationHtml({ binding: "switch.pump", result: "unknown", summary: "left as it is (`keep`)" });
+  assert.match(html, /<p class="summary">left as it is \(<code>keep<\/code>\)<\/p>/);
+});
+
+test("explanation html: implicit else when no arm applies", () => {
+  const groups = [
+    { guard: "a", line: 3, condition: true, arms: [{ arm: "b -> 1", line: 4, condition: false }] },
+    { arm: "c -> 2", line: 5, condition: "unknown" },
+  ];
+  const machine = explanationHtml({ machine: "mode", state: "x", summary: "s", arms: groups });
+  assert.match(machine, /<li class="arm active implicit">/);
+  assert.ok(machine.includes(`else <span class="arrow">-&gt;</span>\u00a0keep`));
+  assert.doesNotMatch(machine, /class="summary"/); // the arms say the same
+  const let_ = explanationHtml({ let: "v", file: "f", value: "unknown", arms: groups });
+  assert.ok(let_.includes(`else <span class="arrow">-&gt;</span>\u00a0unknown`));
+  // an arm inside a group decides: no implicit else
+  groups[0].arms[0].active = true;
+  assert.doesNotMatch(explanationHtml({ machine: "mode", arms: groups }), /implicit/);
+});
+
+test("explanation html: code may wrap after an opening bracket", () => {
+  const html = explanationHtml({ let: "v", file: "f", value: 1, values: { "age(manual(fan.x)) + f()": 1 } });
+  assert.ok(html.includes("age(<wbr>manual(<wbr>fan.x)) + f()"));
 });

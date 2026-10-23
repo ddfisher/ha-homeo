@@ -119,11 +119,11 @@ try {
   // Explain the fan's rule (the running version), then follow the cursor
   await panel.locator(".cm-line", { hasText: "fan.ceiling_fan :=" }).click();
   await panel.locator("button.explain").click();
-  await until("explain", async () => (await explanation()).includes("fan.ceiling_fan should be"));
+  await until("explain", async () => /fan\.ceiling_fan\s*binding/.test(await explanation()));
   check("explain notes unsaved changes", (await explanation()).includes("without your unsaved changes"));
   await shot("panel-explain");
   await panel.locator(".cm-line", { hasText: "kelvin: 2700" }).click();
-  await until("explain follows the cursor", async () => (await explanation()).includes("light.bed_light should be"));
+  await until("explain follows the cursor", async () => /light\.bed_light\s*binding/.test(await explanation()));
   await panel.locator(".cm-line", { hasText: "let night" }).click();
   await until("explain a let", async () => /night\s*let/.test(await explanation()));
   const nightText = await explanation();
