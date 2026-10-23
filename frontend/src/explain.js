@@ -18,6 +18,11 @@ export function statementTarget(text, line) {
   return null;
 }
 
+/** Source code as HTML, preferring to wrap just inside an opening bracket. */
+function code(s) {
+  return esc(s).replace(/[([](?![)\]])/g, "$&<wbr>");
+}
+
 /** Text with `backtick` spans shown as code, as in summaries and error messages. */
 export function prose(s) {
   return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -34,14 +39,14 @@ function value(v) {
 function values(vals) {
   if (!vals || !Object.keys(vals).length) return "";
   const rows = Object.entries(vals)
-    .map(([k, v]) => `<div class="row"><code class="expr">${esc(k)}</code><span class="val">${value(v)}</span></div>`)
+    .map(([k, v]) => `<div class="row"><code class="expr">${code(k)}</code><span class="val">${value(v)}</span></div>`)
     .join("");
   return `<div class="values">${rows}</div>`;
 }
 
 /** An arm's source, wrapping before `->` rather than inside it. */
 function armText(s) {
-  return s.split(" -> ").map(esc).join(` <span class="arrow">-&gt;</span>\u00a0`);
+  return s.split(" -> ").map(code).join(` <span class="arrow">-&gt;</span>\u00a0`);
 }
 
 /** A round true/false/unknown mark, as used for arms and the device check. */
@@ -96,7 +101,7 @@ export function explanationHtml(e) {
   const facts = [];
   if ("result" in e) facts.push(["result", `<strong>${value(e.result)}</strong>`]);
   if ("value" in e) facts.push(["value", `<strong>${value(e.value)}</strong>`]);
-  if ("definition" in e) facts.push(["definition", `<code>${esc(e.definition)}</code>`]);
+  if ("definition" in e) facts.push(["definition", `<code>${code(e.definition)}</code>`]);
   if ("changed" in e) facts.push(["changed", esc(e.changed)]);
   if ("state" in e) facts.push(["state", `<strong>${esc(e.state)}</strong>`]);
   if ("since" in e) facts.push(["since", esc(e.since)]);

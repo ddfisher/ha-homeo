@@ -173,3 +173,8 @@ test("explanation html: implicit else when no arm applies", () => {
   groups[0].arms[0].active = true;
   assert.doesNotMatch(explanationHtml({ machine: "mode", arms: groups }), /implicit/);
 });
+
+test("explanation html: code may wrap after an opening bracket", () => {
+  const html = explanationHtml({ let: "v", file: "f", value: 1, values: { "age(manual(fan.x)) + f()": 1 } });
+  assert.ok(html.includes("age(<wbr>manual(<wbr>fan.x)) + f()"));
+});

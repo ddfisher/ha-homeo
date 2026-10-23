@@ -171,7 +171,8 @@ aside.explanation[hidden] { display: none; }
   background: rgba(var(--rgb-warning-color, 255, 166, 0), 0.12);
 }
 .explanation-body > .error { margin: 12px 0 0; }
-.explanation-body code { overflow-wrap: anywhere; }
+/* Code wraps at spaces and after "("; a name is split only when it can't fit on a line. */
+.explanation-body code { overflow-wrap: break-word; }
 
 .expl { padding: 16px 0 4px; }
 .expl + .expl { border-top: 1px solid var(--divider-color); margin-top: 12px; }
@@ -223,11 +224,11 @@ dl.facts strong { font-weight: 500; }
 }
 .section-label .how { text-transform: none; letter-spacing: normal; font-weight: normal; }
 
-.values { display: grid; grid-template-columns: minmax(0, 1fr) auto; margin: 4px 0 0; }
+.values { display: grid; grid-template-columns: minmax(50%, 1fr) auto; margin: 4px 0 0; }
 .values .row { display: contents; }
 .values .expr, .values .val { padding: 3px 0; border-top: 1px dashed var(--divider-color); }
 .values .row:first-child > * { border-top: none; }
-.values .expr { color: var(--secondary-text-color); padding-right: 12px; }
+.values .expr { color: var(--secondary-text-color); padding-right: 12px; padding-left: 2ch; text-indent: -2ch; }
 .values .val {
   max-width: 14em;
   text-align: right;
@@ -245,7 +246,7 @@ li.arm.active {
 }
 ul.arms ul.arms li.arm.active { background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.1); border-radius: 6px; }
 .arm-head { display: flex; gap: 8px; align-items: flex-start; }
-.arm-head code { flex: 1; min-width: 0; font-size: 13px; overflow-wrap: break-word; }
+.arm-head code { flex: 1; min-width: 0; font-size: 13px; padding-left: 2ch; text-indent: -2ch; }
 .arm-head .arrow { white-space: nowrap; }
 li.arm.off > .arm-head code, li.arm.idle > .arm-head code { color: var(--secondary-text-color); }
 li.arm.active > .arm-head code { font-weight: 500; }
