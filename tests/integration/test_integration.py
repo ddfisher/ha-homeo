@@ -1,5 +1,6 @@
 """Integration tests against a real (test) Home Assistant."""
 
+import asyncio
 from datetime import timedelta
 
 from homeassistant.core import Context, HomeAssistant, State
@@ -97,17 +98,29 @@ async def test_compile_errors_create_issue_and_keep_old_rules(
     assert issues.async_get_issue(DOMAIN, "compile_error_pump_homeo") is None
 
 
-async def test_file_changes_are_picked_up_by_polling(
-    hass: HomeAssistant, setup_homeo, rules_dir, freezer
-):
+async def wait_for(hass: HomeAssistant, predicate, timeout: float = 5.0) -> None:
+    """Wait for something done by the watcher thread (real time, not the frozen clock)."""
+    loop_deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > loop_deadline:
+            raise AssertionError("timed out")
+        await asyncio.sleep(0.05)
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1))
+        await hass.async_block_till_done()
+
+
+async def test_file_watcher_reloads_on_save(hass: HomeAssistant, setup_homeo, rules_dir):
     hass.states.async_set("switch.pump", "off")
     turn_on = async_mock_service(hass, "switch", "turn_on")
-    await setup_homeo({})
+    turn_off = async_mock_service(hass, "switch", "turn_off")
+    entry = await setup_homeo({})
     (rules_dir / "new.homeo").write_text("switch.pump := on\n")
-    freezer.tick(timedelta(seconds=3))
-    async_fire_time_changed(hass)
-    await hass.async_block_till_done(wait_background_tasks=True)
-    assert len(turn_on) == 1
+    await wait_for(hass, lambda: len(turn_on) == 1)
+    (rules_dir / "new.homeo").write_text("switch.pump := off\n")
+    await wait_for(hass, lambda: len(turn_off) == 1)
+    (rules_dir / "new.homeo").unlink()
+    await wait_for(hass, lambda: not entry.runtime_data.programs)
+    (rules_dir / "notes.txt").write_text("not a rules file\n")  # ignored
 
 
 MACHINE = """
@@ -156,7 +169,10 @@ async def test_state_machine_restored_with_change_time(hass: HomeAssistant, setu
             )
         ],
     )
-    await setup_homeo({"bath.homeo": MACHINE})
+    rules = MACHINE.replace(
+        'bath_mode == "boost" for 30min', 'bath_mode == "boost" and age(bath_mode) >= 30min'
+    )
+    await setup_homeo({"bath.homeo": rules})
     assert hass.states.get("select.homeo_bath_mode").state == "boost"
     freezer.tick(timedelta(minutes=10, seconds=1))
     async_fire_time_changed(hass)
@@ -219,3 +235,11 @@ async def test_files_with_errors_retry_when_entities_appear(
     await hass.async_block_till_done(wait_background_tasks=True)
     assert "late.homeo" not in entry.runtime_data.errors
     assert len(turn_on) == 1
+
+
+async def test_boot_time_survives_entry_reload(hass: HomeAssistant, setup_homeo):
+    entry = await setup_homeo({})
+    boot = entry.runtime_data.host.boot_time
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.runtime_data.host.boot_time == boot

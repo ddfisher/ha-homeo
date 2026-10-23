@@ -301,12 +301,15 @@ class Runtime:
     # ============================================================= cell values
 
     def _init_cell(self, rc: RCell) -> None:
-        """Initial value of a new cell. History before now is unknown (I1)."""
+        """Initial value of a new cell (D17). A change time from before the restart means
+        "some time before the restart" (rule 2); one after boot is a real change, so it's exact."""
         d = rc.defn
         self._cur_wake = INF
         if isinstance(d, ir.EventTypeCell):
             rc.extra["t"] = self._initial_event_type(d)
-        elif isinstance(d, (ir.ManualCell, ir.BusCell)):
+        elif isinstance(d, ir.ManualCell):
+            rc.extra["t"] = NEVER  # manual() history isn't kept across restarts (§17)
+        elif isinstance(d, ir.BusCell):
             rc.extra["t"] = maybe_before(self.now)
         elif isinstance(d, ir.ToggleCell):
             rc.extra["seen"] = self.cells[d.source.key].occurrence()
@@ -318,27 +321,29 @@ class Runtime:
         rc.wake = self._cur_wake
         self._push_wake(rc)
         rc.value = v
-        upper = self.now
-        if isinstance(d, ir.EntityCell):
-            st = self.host.get_state(d.entity_id)
-            if st is not None:
-                upper = min(self.now, st.last_changed if d.attr is None else st.last_updated)
-        elif isinstance(d, ir.ExprCell) and not ir.uses_now(d.expr):
-            # An expression only changes when an input does, so it last changed no later
-            # than its most recent input change (e.g. a restored state machine's).
-            deps = self.deps_of[id(rc)]
-            if deps:
-                upper = min(self.now, max(dep.ct.hi for dep in deps))
+        rc.ct = maybe_before(self.now)
         if isinstance(d, ir.ToggleCell):
             rc.ct = Num.of(self.now)
-        else:
-            rc.ct = maybe_before(upper)
+        elif isinstance(d, ir.EntityCell):
+            rc.ct = self._initial_change_time(d)
         if v is UNKNOWN:
             rc.known = NOTHING
             rc.t_true = maybe_before(self.now)
         else:
             rc.known = v
             rc.t_true = rc.ct if to_bool(v) is True else maybe_before(rc.ct.hi)
+
+    def _initial_change_time(self, d: ir.EntityCell) -> Num:
+        st = self.host.get_state(d.entity_id)
+        boot = self.host.boot_time
+        if st is None:
+            return maybe_before(self.now)
+        if d.attr is None:
+            if boot < st.last_changed <= self.now:
+                return Num.of(st.last_changed)  # changed since boot: exact
+            return maybe_before(min(boot, self.now))  # some time before the restart
+        # HA doesn't track attribute changes; it changed at or before the last update.
+        return maybe_before(min(self.now, max(boot, st.last_updated)))
 
     def _initial_event_type(self, d: ir.EventTypeCell) -> Num:
         st = self.host.get_state(d.entity_id)

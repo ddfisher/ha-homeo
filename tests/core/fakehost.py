@@ -26,7 +26,8 @@ class FakeHost:
     ):
         self.t = start
         self.tz = ZoneInfo(tz)
-        self.boot_time = start if boot_time is None else boot_time
+        # By default HA has been running for two days when homeo loads.
+        self.boot_time = start - 2 * 86400 if boot_time is None else boot_time
         self.states: dict[str, EntityState] = {}
         self.registry: set[str] = set()  # entities known without a state
         self.subs: dict[str, list[Callable[[StateChange], None]]] = {}

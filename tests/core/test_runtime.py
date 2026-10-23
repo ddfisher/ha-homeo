@@ -3,6 +3,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from custom_components.homeo.core.host import EntityState
 from custom_components.homeo.core.runtime import NOTHING
 
 from .fakehost import FakeHost, standard_world
@@ -254,6 +255,7 @@ switch.pump := hi
 """
     )
     assert r.rt.binding("switch.pump").last_known is NOTHING
+    r.h.advance(1)
     r.h.set_state("sensor.bathroom_co2", "900")
     assert r.new_calls() == ["switch.turn_on switch.pump"]
 
@@ -661,7 +663,11 @@ state house = "home":
 
 
 def test_restart_machine_keeps_change_time():
-    r = Rig(BATH)
+    rules = BATH.replace(
+        'bath_mode == "off" for 2h                   -> "auto"',
+        'bath_mode == "off" and age(bath_mode) > 2h -> "auto"',
+    )
+    r = Rig(rules)
     r.h.advance(1)
     r.h.event("event.bathroom_remote", "long_press")
     assert r.machine("bath_mode") == "off"
@@ -672,6 +678,19 @@ def test_restart_machine_keeps_change_time():
     assert r.machine("bath_mode") == "off"
     r.h.advance(2)
     assert r.machine("bath_mode") == "auto"  # 2 h after the real entry, not after boot
+
+
+def test_restart_for_on_machine_waits_full_duration():
+    # `for` tracks when the expression changed, which isn't kept across restarts (D13b, §17.5)
+    r = Rig(BATH)
+    r.h.advance(1)
+    r.h.event("event.bathroom_remote", "long_press")
+    r.h.advance(H)
+    r.restart(downtime=10 * MIN)
+    r.h.advance(2 * H - 1)
+    assert r.machine("bath_mode") == "off"
+    r.h.advance(1)
+    assert r.machine("bath_mode") == "auto"
 
 
 def test_restart_actions_dont_catch_up():
@@ -803,3 +822,41 @@ def test_full_example_scripted_day():
     assert (
         calls.count("notify.mobile_app_phone message=Bathroom still very humid. Window open?") == 1
     )
+
+
+def test_restart_overrides_pre_restart_manual_change():
+    # D17 rule 3, accepted cost: manual() history isn't kept, so the rule takes over again.
+    r = Rig("fan.bathroom :=\n    age(manual(fan.bathroom)) < 1h -> keep\n    else -> on\n")
+    assert r.new_calls() == ["fan.turn_on fan.bathroom"]
+    r.h.advance(60)
+    r.h.set_state("fan.bathroom", "off")  # by hand
+    assert r.new_calls() == []
+    r.restart(downtime=60)
+    assert r.new_calls() == ["fan.turn_on fan.bathroom"]
+
+
+def test_change_since_boot_keeps_exact_time():
+    h = standard_world()
+    h.states["binary_sensor.hall_motion"] = EntityState(
+        "binary_sensor.hall_motion", "off", {}, h.t - 120, h.t - 120
+    )
+    r = Rig(
+        "light.hall := binary_sensor.hall_motion or age(binary_sensor.hall_motion) < 10min", host=h
+    )
+    assert r.new_calls() == ["light.turn_on light.hall"]  # motion ended 2 min ago
+    h.advance(8 * MIN)
+    assert r.new_calls() == ["light.turn_off light.hall"]
+
+
+def test_device_reconnecting_after_boot_is_not_a_change():
+    r = Rig("light.hall := binary_sensor.hall_motion or age(binary_sensor.hall_motion) < 10min")
+    r.h.set_state("binary_sensor.hall_motion", "on")
+    r.h.advance(60)
+    r.h.set_state("binary_sensor.hall_motion", "off")
+    r.h.advance(15 * MIN)
+    r.new_calls()
+    r.restart(downtime=30, changes={"binary_sensor.hall_motion": ("unavailable", {})})
+    r.h.advance(20)
+    r.h.set_state("binary_sensor.hall_motion", "off")  # integration reconnects
+    r.h.advance(10 * MIN)
+    assert r.new_calls() == []

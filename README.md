@@ -1,3 +1,5 @@
+<img src="custom_components/homeo/brand/icon.png" alt="" width="96" align="right">
+
 # Homeo
 
 Declarative rules for Home Assistant. Instead of trigger/condition/action automations, you
@@ -65,3 +67,7 @@ uv venv --python 3.14 && uv pip install -r requirements_test.txt
 The language core (`custom_components/homeo/core/`) doesn't import Home Assistant and is
 tested against a fake host with a simulated clock (`tests/core/`). Integration tests use
 `pytest-homeassistant-custom-component` (`tests/integration/`).
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).

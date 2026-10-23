@@ -45,7 +45,7 @@ Manifest keys we'll use (`loader.py` `Manifest`): `config_flow`, `single_config_
 `requirements`.
 
 **→ implication:** add `hacs.json`, `custom_components/homeo/manifest.json`, a `brand/icon.png`, a
-LICENSE (owner to choose), and CI with `hassfest` + HACS action before a release.
+LICENSE (MIT), and CI with `hassfest` + HACS action before a release.
 
 ## 3. State objects, change events and times
 
@@ -69,7 +69,7 @@ LICENSE (owner to choose), and CI with `hassfest` + HACS action before a release
   loop timer fires early (`_TrackPointUTCTime.__call__`), so callbacks can rely on
   `dt_util.utcnow() >= when`. `async_track_point_in_time` is the same with local→UTC conversion.
   `async_call_later(hass, delay, action)` is the relative form.
-- `async_track_time_interval(hass, action, interval)` for periodic work (used for file polling).
+- `async_track_time_interval(hass, action, interval)` for periodic work.
 
 **→ implication:** the HA host adapter subscribes per entity with
 `async_track_state_change_event`, schedules wake-ups with `async_track_point_in_utc_time`, and
@@ -243,9 +243,12 @@ registry entries count as known but warn.
   `watchdog==6.0.0` package as a requirement.
 - File I/O must go through `hass.async_add_executor_job` (HA warns on blocking I/O in the loop).
 
-**→ implication:** poll `<config>/homeo/*.homeo` mtimes/sizes every 2 s in the executor (cheap,
-no extra dependency, works on network filesystems where inotify doesn't), plus a `homeo.reload`
-service. Swap to `watchdog` later if polling proves too slow.
+**→ implication:** watch `<config>/homeo/` with `watchdog` (inotify on Linux), listed as a
+requirement (`watchdog>=6.0.0`, compatible with `folder_watcher`'s pin). Its observer runs a
+thread: start and stop it in the executor, and stop it on `EVENT_HOMEASSISTANT_STOP` and on
+unload (HA's test harness fails tests that leave threads behind). Debounce events, since
+editors save in several steps (write, rename, chmod). Fall back to watchdog's polling observer
+if inotify can't be set up (e.g. the watch limit is reached). Plus a `homeo.reload` service.
 
 ## 15. Editor panel (§19, last step)
 

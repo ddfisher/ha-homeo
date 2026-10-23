@@ -12,7 +12,9 @@ spec left gaps. Each such decision has an ID (`I1`, `I2`, …), is summarised in
 ```
 custom_components/homeo/
   manifest.json, hacs-facing metadata, strings.json, translations/en.json, services.yaml, brand/
-  __init__.py        config-entry setup, file polling, reloads, services (homeo.reload, homeo.explain)
+  __init__.py        config-entry setup and services (homeo.reload, homeo.explain)
+  manager.py         compiling, atomic reloads, repairs issues
+  watcher.py         file watcher (watchdog/inotify) for <config>/homeo/*.homeo
   config_flow.py     single-instance config flow
   host.py            HassHost: the HA implementation of the core's Host interface
   select.py          select.homeo_<name> entities for state machines (RestoreEntity)
@@ -100,15 +102,19 @@ This one representation gives three things the design asks for, with no special 
   `age(x) < 10min` is unknown for 10 minutes, then false. `latest` and `fresh()` compare
   intervals the same way, so two pre-boot times can't be ordered (unknown) while a post-boot
   time beats any pre-boot one.
-- **Partial knowledge at load.** At load, an entity's change time is only known to be *at or
-  before* HA's `last_changed`: `(−∞, last_changed]` (attributes: `(−∞, last_updated]`).
-  `last_changed` can't be trusted as exact even when it's after boot, because an integration
-  reconnecting after boot (`unavailable → off`) looks like a fresh change and would, say, switch
-  on a motion light via `age(motion) < 10min`. A derived expression only changes when one of its
-  inputs does, so its change time is bounded by its inputs' latest change time (this is how
-  `bath_mode == "boost" for 30min` keeps working across a restart: the machine's change time
-  is restored exactly). The first known value of a cell that was unavailable at load gets
-  `(−∞, now]`.
+- **Change times at load (D17 rule 2, as the design states).** "Boot" is when homeo first
+  started in this HA run (HA's `started` event on a normal boot; kept across config-entry
+  reloads). An entity whose HA `last_changed` is after boot changed for real, so its change
+  time is exact. One at or before boot means "some time before the restart": `(−∞, boot]`.
+  Attributes, which HA doesn't timestamp, are `(−∞, max(boot, last_updated)]`. Derived values
+  (e.g. `bath_mode == "boost"`) start as "some time before now", so `for` on them waits its
+  full duration after a restart (D13b, §17 rule 5); `age()` of a restored machine itself is
+  exact. `manual()` history is lost (§17), so `manual(x)` starts as never happened, and a
+  pre-restart manual change is overridden (the design's accepted cost).
+- **Values that appear after load.** D16: change times skip unknown periods. A cell with no
+  known value yet (e.g. a device that's `unavailable` at boot) gets "some time before now" as
+  the change time of its first known value, so a device reconnecting after boot doesn't look
+  like a fresh change (no motion light switched on by `age(motion) < 10min`).
 
 A bound of `−∞` together with a `maybe_never` flag represents "never happened, or happened
 before we started watching" (e.g. a bool that is false at load). `latest` takes its `else` only
@@ -314,7 +320,7 @@ calling services. Bindings still update `last_known_result` as if they had writt
 | M2 | Checker | names, types, targets, writers, one-writer rule across files, `else` rules, `fresh`/`on` placement, state checks, cycles; each design-listed compile error has a test |
 | M3 | Runtime core | cells, waves, wake-ups, cascades, `latest`, `age`/`for`, history functions, machines, actions, bindings, manual detection, restart and reload semantics, against FakeHost |
 | M4 | Writers | service mapping and read-back for the full v1 table |
-| M5 | HA integration | config flow, HassHost, file polling + atomic reloads, `select` entities with restore, repairs issues, contexts + logbook, `homeo.reload`, dry run |
+| M5 | HA integration | config flow, HassHost, file watching + atomic reloads, `select` entities with restore, repairs issues, contexts + logbook, `homeo.reload`, dry run |
 | M6 | Tooling | `homeo.explain` (per-subexpression values, active arm, sugar expanded); optional diagnostic sensor |
 | M7 | Editor panel | sidebar panel, syntax highlighting, inline errors via websocket `check`, save |
 | — | Release | `hacs.json`, brand icon, LICENSE, README, CI (pytest, hassfest, HACS action), first GitHub release |
@@ -377,14 +383,15 @@ Done (256 tests: 245 core, 11 integration):
   wake-ups, cascades, `latest`, history functions, machines, actions, bindings, manual
   detection, restart and reload semantics. The §21 example runs through a scripted day.
 - **M4** writers (`core/writers.py`): the full v1 table with read-back tolerances.
-- **M5 (first version)**: config flow, `HassHost`, file polling with atomic reloads, repairs
-  issues, `select.homeo_*` entities with restore (value + change time), contexts, logbook
-  attribution, `homeo.reload`, dry-run option. Placeholder brand icon.
+- **M5 (first version)**: config flow, `HassHost`, a file watcher with debounced atomic
+  reloads, repairs issues, `select.homeo_*` entities with restore (value + change time),
+  contexts, logbook attribution, `homeo.reload`, dry-run option. MIT license and brand icon
+  (drawn by `tools/make_icon.py`).
 
 Notes from implementation:
-- `manual(x)` starts as "never, or some time before load", so `age(manual(x)) < 1h` is unknown
-  (and falls through in cascades) for the first hour after a restart. This matches D17's
-  accepted cost (pre-restart manual changes aren't kept).
+- After review, restart handling follows the design's D17 directly (see §2.1): change times
+  after boot are exact, `manual()` starts as never happened, and `for` on derived values waits
+  its full duration after a restart.
 - The "`else` required" rule applies to blocks written directly in a binding; a binding that
   uses a `let` holding a `latest` without `else` gets `unknown` (→ keep) until a condition
   happens.
@@ -393,8 +400,10 @@ Notes from implementation:
   as the design's comment says.
 
 Next:
-- M5 polish: tests for stale `select` entity cleanup, a LICENSE (owner's choice), a real brand
-  icon, and hassfest/HACS CI checks before a first release.
+- M5 polish: tests for stale `select` entity cleanup, and hassfest/HACS CI checks before a
+  first release.
+- Rule files are watched with `watchdog` (inotify), with a 0.5 s debounce because editors save
+  in several steps; if inotify isn't available it falls back to checking every 2 s.
 - Rules are compiled once HA has started; files with errors are retried whenever the set of
   entities changes, so rules referencing entities from late-loading integrations recover on
   their own.

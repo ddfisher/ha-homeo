@@ -165,7 +165,7 @@ Settled during implementation. Details and rationale are in `docs/implementation
 
 | ID | Gap | Decision |
 |---|---|---|
-| I1 | Restart lower bounds, wake-ups | Time quantities are intervals that move with the clock; one mechanism gives exact wake-ups and D17's "at least since boot" bounds. At load, HA's `last_changed` is used only as an upper bound |
+| I1 | Restart lower bounds, wake-ups | Time quantities are intervals that move with the clock; one mechanism gives exact wake-ups and D17's "at least since boot" bounds. Restart rules are exactly D17's: changes after boot are exact, earlier ones mean "some time before the restart", `manual()` starts as never happened |
 | I2 | Glitch-free evaluation | Waves in topological order; machines are sources and settle (chains) before bindings and actions run |
 | I3 | Ranges | `now in A..B` is true when `A` occurred more recently than `B` (start inclusive, end exclusive) |
 | I4 | DST | Non-existent wall times resolve to the first instant after the gap; ambiguous ones to the first occurrence |

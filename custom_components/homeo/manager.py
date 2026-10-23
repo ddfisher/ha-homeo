@@ -2,28 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, EVENT_STATE_CHANGED
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.start import async_at_started
 
-from .const import CONF_DRY_RUN, DOMAIN, ISSUE_PREFIX, POLL_INTERVAL, RULES_DIR, RULES_SUFFIX
+from .const import (
+    BOOT_TIME_KEY,
+    CONF_DRY_RUN,
+    DOMAIN,
+    ENTITY_DEBOUNCE,
+    FILE_DEBOUNCE,
+    ISSUE_PREFIX,
+    RULES_DIR,
+    RULES_SUFFIX,
+)
 from .core.checker import Globals, check
 from .core.errors import CompileError, Diagnostic
 from .core.ir import Program
 from .core.parser import parse
 from .core.runtime import Runtime
 from .hass_host import HassHost
+from .watcher import RulesWatcher
 
 if TYPE_CHECKING:
     from .select import MachineSelect
@@ -34,8 +46,6 @@ _LOGGER = logging.getLogger(__package__)
 @dataclass
 class RuleFile:
     name: str
-    mtime: float
-    size: int
     text: str
 
 
@@ -44,18 +54,8 @@ def _read_rule_files(directory: Path) -> dict[str, RuleFile]:
     directory.mkdir(exist_ok=True)
     out = {}
     for path in sorted(directory.glob(f"*{RULES_SUFFIX}")):
-        st = path.stat()
-        out[path.name] = RuleFile(path.name, st.st_mtime, st.st_size, path.read_text("utf-8"))
+        out[path.name] = RuleFile(path.name, path.read_text("utf-8"))
     return out
-
-
-def _stat_rule_files(directory: Path) -> dict[str, tuple[float, int]]:
-    """Runs in the executor."""
-    if not directory.is_dir():
-        return {}
-    return {
-        p.name: (p.stat().st_mtime, p.stat().st_size) for p in directory.glob(f"*{RULES_SUFFIX}")
-    }
 
 
 def issue_id(file: str) -> str:
@@ -75,9 +75,12 @@ class HomeoManager:
         self.add_select_entities: Callable[[list[Any]], None] | None = None
         self.machine_entities: dict[str, MachineSelect] = {}
         self._unsubs: list[Callable[[], None]] = []
-        self._reloading = False
         self._started = False
-        self._entity_count = 0  # entities known at the last compile
+        self._closed = False
+        self._lock = asyncio.Lock()
+        self._debounce: Callable[[], None] | None = None
+        self._stop_unsub: Callable[[], None] | None = None
+        self.watcher = RulesWatcher(self.directory, self._file_changed)
 
     @property
     def dry_run(self) -> bool:
@@ -88,52 +91,93 @@ class HomeoManager:
     async def async_start(self) -> None:
         # Compile and run once HA has started (D17 rule 1), so entities from integrations
         # that load after us exist and have states to infer types from.
+        self._stop_unsub = self.hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STOP, self._async_on_stop
+        )
         self._unsubs.append(async_at_started(self.hass, self._async_started))
 
     async def _async_started(self, _hass: HomeAssistant) -> None:
-        self.host.boot_time = self.host.now()
+        # Change times before the first start in this HA run mean "some time before the
+        # restart" (D17 rule 2). Kept across config-entry reloads, which aren't restarts.
+        boot = self.hass.data.setdefault(BOOT_TIME_KEY, self.host.now())
+        self.host.boot_time = boot
         self._started = True
         await self.async_reload()
         self.runtime.start()
+        await self.hass.async_add_executor_job(self.watcher.start)
         self._unsubs.append(
-            async_track_time_interval(
-                self.hass, self._async_poll, POLL_INTERVAL, cancel_on_shutdown=True
+            self.hass.bus.async_listen(
+                EVENT_STATE_CHANGED, self._entity_appeared, event_filter=self._is_new_entity
+            )
+        )
+        self._unsubs.append(
+            self.hass.bus.async_listen(
+                er.EVENT_ENTITY_REGISTRY_UPDATED,
+                self._entity_appeared,
+                event_filter=self._is_registry_create,
             )
         )
 
+    async def _async_on_stop(self, _event: Event) -> None:
+        self._stop_unsub = None
+        self._closed = True
+        await self.hass.async_add_executor_job(self.watcher.stop)
+
     async def async_stop(self) -> None:
+        self._closed = True
+        await self.hass.async_add_executor_job(self.watcher.stop)
         for u in self._unsubs:
             u()
         self._unsubs = []
+        if self._stop_unsub is not None:
+            self._stop_unsub()
+            self._stop_unsub = None
+        if self._debounce is not None:
+            self._debounce()
+            self._debounce = None
         self.runtime.stop()
 
     # --------------------------------------------------------------- reloads
 
-    async def _async_poll(self, _now: datetime) -> None:
-        if self._reloading:
-            return
-        stats = await self.hass.async_add_executor_job(_stat_rule_files, self.directory)
-        known = {name: (f.mtime, f.size) for name, f in self.files.items()}
-        # Files with errors are retried when entities appear (e.g. a late integration).
-        if stats != known or (self.errors and self._count_entities() != self._entity_count):
-            await self.async_reload()
+    def _file_changed(self) -> None:
+        """Called from the watcher thread."""
+        self.hass.loop.call_soon_threadsafe(self._schedule_reload, FILE_DEBOUNCE)
 
-    def _count_entities(self) -> int:
-        return len(self.hass.states.async_entity_ids()) + len(er.async_get(self.hass).entities)
+    @callback
+    def _is_new_entity(self, data: Mapping[str, Any]) -> bool:
+        return bool(self.errors) and data["old_state"] is None
+
+    @callback
+    def _is_registry_create(self, data: Mapping[str, Any]) -> bool:
+        return bool(self.errors) and data.get("action") == "create"
+
+    @callback
+    def _entity_appeared(self, _event: Event) -> None:
+        # Files with errors are retried when entities appear (e.g. a late integration).
+        self._schedule_reload(ENTITY_DEBOUNCE)
+
+    @callback
+    def _schedule_reload(self, delay: float) -> None:
+        """Reload after `delay` s without further changes (editors save in several steps)."""
+        if self._closed:  # an event that arrived after we stopped
+            return
+        if self._debounce is not None:
+            self._debounce()
+        self._debounce = async_call_later(self.hass, delay, self._async_debounced_reload)
+
+    async def _async_debounced_reload(self, _now: datetime) -> None:
+        self._debounce = None
+        await self.async_reload()
 
     async def async_reload(self) -> None:
         """Re-read and recompile all files. A file with errors keeps its previous version
         running and gets a repairs issue (§2, §19)."""
         if not self._started:
             return
-        self._reloading = True
-        try:
+        async with self._lock:
             files = await self.hass.async_add_executor_job(_read_rule_files, self.directory)
-        finally:
-            self._reloading = False
-        self.files = files
-        self._entity_count = self._count_entities()
-        self.apply(self.compile_all(files))
+            self.files = files
+            self.apply(self.compile_all(files))
 
     def compile_all(self, files: dict[str, RuleFile]) -> dict[str, Program]:
         g = Globals()
