@@ -29,6 +29,16 @@
     "reload": {
       "name": "Reload rules",
       "description": "Re-reads all .homeo files now."
+    },
+    "explain": {
+      "name": "Explain",
+      "description": "Shows why a rule gives its current result: each arm's condition and the values it depends on.",
+      "fields": {
+        "target": {
+          "name": "Target",
+          "description": "A bound entity or attribute (`fan.bathroom`, `climate.living.temperature`), a state machine (`house` or `select.homeo_house`), or a `let` name."
+        }
+      }
     }
   }
 }

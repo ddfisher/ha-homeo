@@ -228,6 +228,7 @@ class Checker:
                 pass
         self.check_action_targets()
         self.check_binding_cycles()
+        self.program.lets = dict(self.let_values)
         self.program.warnings = self.sink.warnings
         self.sink.raise_if_errors()
         return self.program
@@ -1030,7 +1031,7 @@ class Checker:
         if isinstance(a, A.Group):
             guard = self.arm_cond(a.guard, ctx, latest)
             subs = [self.arm(s, ctx, latest=False) for s in a.arms]
-            return ir.GroupIR(guard, subs, a.span, guard.text)
+            return ir.GroupIR(guard, subs, a.span, guard.text, to_source(a.guard))
         cond = None if a.cond is None else self.arm_cond(a.cond, ctx, latest)
         result = self.resolve(a.result, ctx)
         if result.moving:
@@ -1040,7 +1041,9 @@ class Checker:
                 "compare it first, e.g. `age(x) > 10min`",
             )
         text = f"{'else' if cond is None else cond.text} -> {result.text}"
-        return ir.ArmIR(cond, result, a.span, text)
+        cond_source = "else" if a.cond is None else to_source(a.cond)
+        source = f"{cond_source} -> {to_source(a.result)}"
+        return ir.ArmIR(cond, result, a.span, text, source, cond_source)
 
     def arm_cond(self, e: A.Expr, ctx: _Ctx, latest: bool) -> ir.Node:
         if latest:
@@ -1390,7 +1393,9 @@ class Checker:
                 self.fail("expected `domain.service(…)` or `entity.service(…)`", c.func.span)
             entity_id = node.cell.entity_id
             domain, service = entity_id.split(".")[0], segs[0].name
-        elif head.id in self.domains and len(segs) == 1:
+        elif len(segs) == 1:
+            # Any domain: many have services but no entities (persistent_notification,
+            # shell_command, tts, …). A typo is caught by the service check below.
             domain, service = head.id, segs[0].name
         elif head.id in self.domains and len(segs) == 2:
             entity_id = f"{head.id}.{segs[0].name}"

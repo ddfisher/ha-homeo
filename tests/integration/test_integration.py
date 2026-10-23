@@ -2,10 +2,14 @@
 
 import asyncio
 from datetime import timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.core import Context, HomeAssistant, State
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
@@ -158,6 +162,30 @@ async def test_state_machine_select_entity(hass: HomeAssistant, setup_homeo, fre
     assert hass.states.get("select.homeo_bath_mode").state == "auto"
 
 
+async def test_removed_machine_removes_its_select_entity(
+    hass: HomeAssistant, setup_homeo, rules_dir
+):
+    hass.states.async_set("input_button.boost", "unknown")
+    entry = await setup_homeo({"bath.homeo": MACHINE})
+    registry = er.async_get(hass)
+    assert registry.async_get("select.homeo_bath_mode") is not None
+
+    renamed = MACHINE.replace("bath_mode", "bath")
+    (rules_dir / "bath.homeo").write_text(renamed)
+    await entry.runtime_data.async_reload()
+    await hass.async_block_till_done()
+    assert hass.states.get("select.homeo_bath_mode") is None
+    assert registry.async_get("select.homeo_bath_mode") is None
+    assert hass.states.get("select.homeo_bath").state == "auto"
+
+    # and it comes back with the same entity id when the machine does
+    (rules_dir / "bath.homeo").write_text(MACHINE)
+    await entry.runtime_data.async_reload()
+    await hass.async_block_till_done()
+    assert hass.states.get("select.homeo_bath_mode").state == "auto"
+    assert hass.states.get("select.homeo_bath") is None
+
+
 async def test_state_machine_restored_with_change_time(hass: HomeAssistant, setup_homeo, freezer):
     hass.states.async_set("input_button.boost", "unknown")
     entered = dt_util.utcnow() - timedelta(minutes=20)
@@ -290,3 +318,183 @@ async def test_solar_times_match_the_sun_entity(hass: HomeAssistant, setup_homeo
     entry = await setup_homeo({"sun.homeo": "input_boolean.dark := now in sunset..sunrise\n"})
     dark = entry.runtime_data.runtime.binding("input_boolean.dark").last_known
     assert dark == (hass.states.get("sun.sun").state == "below_horizon")
+
+
+async def test_explain_service(hass: HomeAssistant, setup_homeo):
+    hass.states.async_set("sensor.bathroom_co2", "900", {"unit_of_measurement": "ppm"})
+    hass.states.async_set("fan.bathroom", "off")
+    async_mock_service(hass, "fan", "turn_on")
+    await setup_homeo({"bathroom.homeo": FAN})
+
+    response = await hass.services.async_call(
+        DOMAIN, "explain", {"target": "fan.bathroom"}, blocking=True, return_response=True
+    )
+    (e,) = response["explanations"]
+    assert e["binding"] == "fan.bathroom"
+    assert e["result"] == "on"
+    assert e["rule"] == "bathroom.homeo:2"
+    assert [a.get("active", False) for a in e["arms"]] == [False, True]
+    assert e["arms"][1]["values"] == {"sensor.bathroom_co2": 900}
+
+    with pytest.raises(ServiceValidationError, match="did you mean `fan.bathroom`"):
+        await hass.services.async_call(
+            DOMAIN, "explain", {"target": "fan.bathrom"}, blocking=True, return_response=True
+        )
+
+
+async def test_editor_websocket_api(hass: HomeAssistant, setup_homeo, rules_dir, hass_ws_client):
+    hass.states.async_set("switch.pump", "off")
+    hass.states.async_set("binary_sensor.window", "off")
+    async_mock_service(hass, "switch", "turn_on")
+    async_mock_service(hass, "switch", "turn_off")
+    entry = await setup_homeo(
+        {"pump.homeo": "switch.pump := binary_sensor.window\n", "broken.homeo": "let x =\n"}
+    )
+    client = await hass_ws_client(hass)
+
+    async def ws(msg: dict) -> dict:
+        await client.send_json_auto_id(msg)
+        return await client.receive_json()
+
+    r = await ws({"type": "homeo/files"})
+    assert r["success"]
+    assert [{k: f[k] for k in ("name", "loaded", "errors")} for f in r["result"]["files"]] == [
+        {"name": "broken.homeo", "loaded": False, "errors": 1},
+        {"name": "pump.homeo", "loaded": True, "errors": 0},
+    ]
+
+    r = await ws({"type": "homeo/file/read", "name": "pump.homeo"})
+    assert r["result"]["text"] == "switch.pump := binary_sensor.window\n"
+    r = await ws({"type": "homeo/file/read", "name": "../configuration.yaml"})
+    assert not r["success"] and r["error"]["code"] == "invalid_format"
+
+    # check: compiles without loading, against the other files
+    r = await ws({"type": "homeo/file/check", "name": "new.homeo", "text": "switch.pump := on\n"})
+    (d,) = r["result"]["diagnostics"]
+    assert d["severity"] == "error"
+    assert d["message"] == "`switch.pump` is already bound in pump.homeo"
+    assert (d["line"], d["col"]) == (1, 1)
+    r = await ws({"type": "homeo/file/check", "name": "pump.homeo", "text": "switch.pump := on\n"})
+    assert r["result"]["diagnostics"] == []
+    assert "new.homeo" not in {
+        f["name"] for f in (await ws({"type": "homeo/files"}))["result"]["files"]
+    }
+
+    # save: writes and reloads right away
+    r = await ws({"type": "homeo/file/save", "name": "broken.homeo", "text": "let x = on\n"})
+    assert r["result"]["loaded"] is True and r["result"]["diagnostics"] == []
+    assert (rules_dir / "broken.homeo").read_text() == "let x = on\n"
+    assert "broken.homeo" in entry.runtime_data.programs
+    r = await ws({"type": "homeo/file/save", "name": "pump.homeo", "text": "switch.pump := nope\n"})
+    assert r["result"]["loaded"] is False
+    assert "nope" in r["result"]["diagnostics"][0]["message"]
+
+    r = await ws({"type": "homeo/explain", "target": "switch.pump"})
+    assert r["result"]["explanations"][0]["binding"] == "switch.pump"  # the old version runs
+
+    r = await ws({"type": "homeo/file/delete", "name": "broken.homeo"})
+    assert r["success"]
+    assert not (rules_dir / "broken.homeo").exists()
+    assert "broken.homeo" not in entry.runtime_data.programs
+
+
+async def test_editor_websocket_api_needs_admin(
+    hass: HomeAssistant, setup_homeo, hass_ws_client, hass_admin_user
+):
+    await setup_homeo({})
+    hass_admin_user.groups = []  # no longer an admin
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({"type": "homeo/files"})
+    r = await client.receive_json()
+    assert not r["success"] and r["error"]["code"] == "unauthorized"
+
+
+async def test_panel_registered_with_the_frontend(hass: HomeAssistant, setup_homeo):
+    assert await async_setup_component(hass, "http", {})
+    hass.config.components.add("frontend")  # the test environment has no frontend package
+    with (
+        patch.object(hass.http, "async_register_static_paths", AsyncMock()) as static,
+        patch("homeassistant.components.panel_custom.async_register_panel", AsyncMock()) as reg,
+        patch("homeassistant.components.frontend.async_remove_panel") as remove,
+    ):
+        entry = await setup_homeo({})
+        (paths,) = static.call_args.args
+        assert paths[0].url_path == "/homeo_static"
+        assert paths[0].path.endswith("custom_components/homeo/frontend")
+        kwargs = reg.call_args.kwargs
+        assert kwargs["frontend_url_path"] == "homeo"
+        assert kwargs["webcomponent_name"] == "homeo-panel"
+        assert kwargs["require_admin"] is True
+        assert kwargs["module_url"].startswith("/homeo_static/homeo-panel.js?v=")
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        remove.assert_called_once_with(hass, "homeo", warn_if_unknown=False)
+        # static paths can't be unregistered: setting up again doesn't add them twice
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert static.call_count == 1
+        assert reg.call_count == 2
+
+
+async def test_editor_file_names(hass: HomeAssistant, setup_homeo, rules_dir, hass_ws_client):
+    """Any file the integration loads can be edited; nothing outside the folder can."""
+    await setup_homeo({"küche.homeo": "let a = on\n", "living room.homeo": "let b = on\n"})
+    client = await hass_ws_client(hass)
+
+    async def ws(msg: dict) -> dict:
+        await client.send_json_auto_id(msg)
+        return await client.receive_json()
+
+    for name in ("küche.homeo", "living room.homeo"):
+        r = await ws({"type": "homeo/file/read", "name": name})
+        assert r["success"], r
+        r = await ws({"type": "homeo/file/save", "name": name, "text": "let c = off\n"})
+        assert r["success"] and r["result"]["loaded"], r
+    for bad in ("../x.homeo", "a/b.homeo", "a\\b.homeo", ".hidden.homeo", ".homeo", "x.txt"):
+        r = await ws({"type": "homeo/file/read", "name": bad})
+        assert not r["success"] and r["error"]["code"] == "invalid_format", bad
+
+
+async def test_editor_save_conflicts(hass: HomeAssistant, setup_homeo, rules_dir, hass_ws_client):
+    """A save based on an old version of the file is refused, unless forced."""
+    await setup_homeo({"a.homeo": "let a = on\n"})
+    client = await hass_ws_client(hass)
+
+    async def ws(msg: dict) -> dict:
+        await client.send_json_auto_id(msg)
+        return await client.receive_json()
+
+    version = (await ws({"type": "homeo/file/read", "name": "a.homeo"}))["result"]["version"]
+    (rules_dir / "a.homeo").write_text("let a = off  # edited elsewhere\n")
+    save = {"type": "homeo/file/save", "name": "a.homeo", "text": "let a = 1\n"}
+    r = await ws({**save, "version": version})
+    assert not r["success"] and r["error"]["code"] == "conflict"
+    assert "changed outside the editor" in r["error"]["message"]
+    assert "edited elsewhere" in (rules_dir / "a.homeo").read_text()
+
+    r = await ws({**save, "version": version, "force": True})
+    assert r["success"]
+    assert (rules_dir / "a.homeo").read_text() == "let a = 1\n"
+    r = await ws({**save, "text": "let a = 2\n", "version": r["result"]["version"]})
+    assert r["success"]  # based on the version just saved
+
+    # a "new" file that appeared on disk meanwhile
+    (rules_dir / "b.homeo").write_text("let b = on\n")
+    r = await ws({"type": "homeo/file/save", "name": "b.homeo", "text": "x", "version": None})
+    assert r["error"]["code"] == "conflict" and "created outside" in r["error"]["message"]
+
+
+async def test_editor_files_subscription(
+    hass: HomeAssistant, setup_homeo, rules_dir, hass_ws_client
+):
+    entry = await setup_homeo({"a.homeo": "let a = on\n"})
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({"type": "homeo/files/subscribe"})
+    assert (await client.receive_json())["success"]
+    first = await client.receive_json()
+    assert [f["name"] for f in first["event"]["files"]] == ["a.homeo"]
+
+    (rules_dir / "b.homeo").write_text("let b = on\n")
+    await entry.runtime_data.async_reload()  # what the watcher does
+    update = await client.receive_json()
+    assert [f["name"] for f in update["event"]["files"]] == ["a.homeo", "b.homeo"]

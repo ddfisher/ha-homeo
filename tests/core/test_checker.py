@@ -496,6 +496,19 @@ def test_unknown_service_warns(host):
     assert any("doesn't exist" in w.message for w in p.warnings)
 
 
+def test_service_domains_without_entities(host):
+    # Found in a real HA: domains like persistent_notification have services but no entities.
+    p = ok(
+        host,
+        'on input_button.doorbell:\n    persistent_notification.create(message: "x")\n'
+        "    shell_command.ring()\n",
+    )
+    assert [(c.domain, c.service) for c in p.actions[0].calls] == [
+        ("persistent_notification", "create"),
+        ("shell_command", "ring"),
+    ]
+
+
 def test_bus_events(host):
     p = ok(
         host,

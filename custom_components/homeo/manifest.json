@@ -1,11 +1,18 @@
 {
   "domain": "homeo",
   "name": "Homeo",
+  "after_dependencies": [
+    "frontend",
+    "http",
+    "panel_custom"
+  ],
   "codeowners": [
     "@ddfisher"
   ],
   "config_flow": true,
-  "dependencies": [],
+  "dependencies": [
+    "websocket_api"
+  ],
   "documentation": "https://github.com/ddfisher/ha-homeo",
   "integration_type": "service",
   "iot_class": "calculated",

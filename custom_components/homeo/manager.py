@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from collections.abc import Callable, Mapping
@@ -13,9 +14,11 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, EVENT_STATE_CHANGED
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant, ServiceCall, ServiceResponse, callback
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.start import async_at_started
 
@@ -28,9 +31,11 @@ from .const import (
     ISSUE_PREFIX,
     RULES_DIR,
     RULES_SUFFIX,
+    SIGNAL_FILES_CHANGED,
 )
 from .core.checker import Globals, check
 from .core.errors import CompileError, Diagnostic
+from .core.explain import NotFound, explain
 from .core.ir import Program
 from .core.parser import parse
 from .core.runtime import Runtime
@@ -58,6 +63,34 @@ def _read_rule_files(directory: Path) -> dict[str, RuleFile]:
     return out
 
 
+def _read_text(path: Path) -> str | None:
+    """Runs in the executor."""
+    try:
+        return path.read_text("utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def _write_text(path: Path, text: str) -> None:
+    """Runs in the executor. Writes atomically, so the watcher never sees half a file."""
+    path.parent.mkdir(exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, "utf-8")
+    tmp.replace(path)
+
+
+def _delete(path: Path) -> None:
+    """Runs in the executor."""
+    path.unlink(missing_ok=True)
+
+
+def file_version(text: str | None) -> str | None:
+    """A short hash of a file's text, so the editor can tell when it changed elsewhere."""
+    if text is None:
+        return None
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
 def issue_id(file: str) -> str:
     return ISSUE_PREFIX + re.sub(r"[^a-z0-9_]", "_", file.lower())
 
@@ -73,6 +106,7 @@ class HomeoManager:
         self.programs: dict[str, Program] = {}
         self.sources: dict[str, str] = {}  # the text each running program was compiled from
         self.errors: dict[str, list[Diagnostic]] = {}
+        self.globals = Globals()  # what the running files define, for checking an edited file
         self.add_select_entities: Callable[[list[Any]], None] | None = None
         self.machine_entities: dict[str, MachineSelect] = {}
         self._unsubs: list[Callable[[], None]] = []
@@ -179,6 +213,8 @@ class HomeoManager:
             files = await self.hass.async_add_executor_job(_read_rule_files, self.directory)
             self.files = files
             self.apply(self.compile_all(files))
+        # The editor panel refreshes its file list (and notices edits made elsewhere).
+        async_dispatcher_send(self.hass, SIGNAL_FILES_CHANGED)
 
     def compile_all(self, files: dict[str, RuleFile]) -> dict[str, Program]:
         g = Globals()
@@ -223,6 +259,7 @@ class HomeoManager:
             if name not in files:
                 self.clear_report(name)
         self.sources = sources
+        self.globals = g
         return programs
 
     def apply(self, programs: dict[str, Program]) -> None:
@@ -253,6 +290,55 @@ class HomeoManager:
     def clear_report(self, file: str) -> None:
         if self.errors.pop(file, None) is not None:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id(file))
+
+    # ----------------------------------------------------------------- files
+
+    def check_text(self, name: str, text: str) -> list[Diagnostic]:
+        """Compile `text` as file `name` without loading it: its errors and warnings, against
+        the other running files (for the editor panel)."""
+        try:
+            program, _ = check(parse(text, name), self.host, self.globals)
+        except CompileError as err:
+            return err.diagnostics
+        return list(program.warnings)
+
+    async def async_list_files(self) -> list[dict[str, Any]]:
+        files = await self.hass.async_add_executor_job(_read_rule_files, self.directory)
+        return [
+            {
+                "name": name,
+                "loaded": name in self.programs,
+                "errors": len(self.errors.get(name, [])),
+                "version": file_version(f.text),
+            }
+            for name, f in sorted(files.items())
+        ]
+
+    async def async_read_file(self, name: str) -> str | None:
+        path = self.directory / name
+        return await self.hass.async_add_executor_job(_read_text, path)
+
+    async def async_save_file(self, name: str, text: str) -> None:
+        """Write a rule file and reload now (the watcher's reload would come later)."""
+        await self.hass.async_add_executor_job(_write_text, self.directory / name, text)
+        await self.async_reload()
+
+    async def async_delete_file(self, name: str) -> None:
+        await self.hass.async_add_executor_job(_delete, self.directory / name)
+        await self.async_reload()
+
+    # --------------------------------------------------------------- explain
+
+    @callback
+    def explain(self, call: ServiceCall) -> ServiceResponse:
+        """`homeo.explain` (§19): why a binding, state machine or `let` has its value."""
+        target = call.data["target"]
+        if not self._started:
+            raise ServiceValidationError("Homeo hasn't loaded its rules yet")
+        try:
+            return {"explanations": explain(self.runtime, target)}
+        except NotFound as err:
+            raise ServiceValidationError(str(err)) from err
 
     # -------------------------------------------------------------- machines
 

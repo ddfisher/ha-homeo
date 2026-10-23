@@ -154,6 +154,8 @@ class ArmIR:
     result: Node
     span: Span
     text: str
+    source: str = ""  # as written (with `let` names), for homeo.explain
+    cond_source: str = "else"
 
 
 @dataclass(eq=False, slots=True)
@@ -162,6 +164,7 @@ class GroupIR:
     arms: list[ArmIR | GroupIR]
     span: Span
     text: str
+    source: str = ""  # the guard as written
 
 
 @dataclass(eq=False, slots=True)
@@ -344,6 +347,7 @@ class Program:
     bindings: list[BindingDef] = field(default_factory=list)
     actions: list[ActionDef] = field(default_factory=list)
     machines: list[MachineCell] = field(default_factory=list)
+    lets: dict[str, Node] = field(default_factory=dict)  # name → value (for homeo.explain)
     dry_run: bool = False
     warnings: list[Any] = field(default_factory=list)
 

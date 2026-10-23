@@ -13,9 +13,9 @@ Homeo keeps the fan in sync with that expression on every change, without fighti
 changes. It's a custom integration: it watches `<config>/homeo/*.homeo`, compiles the rules
 inside Home Assistant and drives devices through service calls.
 
-**Status: early development.** The language core and a first version of the integration
-work and are tested against Home Assistant's test harness, but haven't been tried on a real
-Home Assistant instance yet. `homeo.explain` and the editor panel aren't built. See
+**Status: early development.** The language core and the integration work, are tested
+against Home Assistant's test harness and have been run in a full Home Assistant with its demo
+devices, but not yet with real ones. See
 "Implementation status" in [`docs/implementation-plan.md`](docs/implementation-plan.md#6-implementation-status-handoff).
 
 ## Docs
@@ -31,8 +31,10 @@ Home Assistant instance yet. `homeo.explain` and the editor panel aren't built. 
 1. Copy `custom_components/homeo` into your Home Assistant `config/custom_components/`
    (or add this repo to HACS as a custom repository).
 2. Restart Home Assistant and add the **Homeo** integration (Settings → Devices & services).
-3. Put rule files in `config/homeo/`, e.g. `config/homeo/bathroom.homeo`. Saving a file reloads
-   it; errors show up under Settings → Repairs, and the previous version keeps running.
+3. Open **Homeo** in the sidebar (admins only) to create and edit rule files, with highlighting
+   and errors shown as you type. Or put files in `config/homeo/` yourself, e.g.
+   `config/homeo/bathroom.homeo`. Saving a file reloads it; errors show up in the editor and
+   under Settings → Repairs, and the previous version keeps running.
 
 ## A taste
 
@@ -57,17 +59,47 @@ on humidity > 90% for 30min:
     notify.mobile_app_phone(message: "Bathroom still very humid. Window open?")
 ```
 
+## Why is it doing that?
+
+In the editor, put the cursor on a rule and press **Explain**. Or call the `homeo.explain`
+action (Developer tools → Actions) with a target: a bound entity
+(`fan.bathroom`), an attribute target (`climate.living.temperature`), a state machine
+(`bath_mode`) or a `let` name. The response says what the rule wants and why, arm by arm:
+
+```yaml
+explanations:
+  - binding: fan.bathroom
+    rule: bathroom.homeo:11
+    result: "on"
+    summary: fan.bathroom should be on, because `bath_mode == "boost"` (line 13)
+    device: "on"
+    device_matches: true
+    arms:
+      - arm: age(manual(fan.bathroom)) < 1h -> keep
+        line: 12
+        condition: false
+        values:
+          age(manual(fan.bathroom)): never happened
+      - arm: bath_mode == "boost" -> on
+        line: 13
+        condition: true
+        active: true
+      ...
+```
+
 ## Development
 
 ```sh
 uv venv --python 3.14 && uv pip install -r requirements_test.txt
 .venv/bin/pytest            # core unit tests + integration tests
-.venv/bin/ruff check custom_components tests
+.venv/bin/ruff check custom_components tests tools
 ```
 
 The language core (`custom_components/homeo/core/`) doesn't import Home Assistant and is
 tested against a fake host with a simulated clock (`tests/core/`). Integration tests use
-`pytest-homeassistant-custom-component` (`tests/integration/`).
+`pytest-homeassistant-custom-component` (`tests/integration/`). `tools/real_ha.py` is a slower
+smoke test in a full Home Assistant with demo devices. The editor panel's source is in
+[`frontend/`](frontend/README.md).
 
 ## License
 
