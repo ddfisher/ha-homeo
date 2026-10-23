@@ -158,6 +158,34 @@ These weren't discussed. Decide each one, document it here, and flag it to the o
   - `sunrise`/`sunset` while `sun.sun` is unavailable.
 - **Output details:** the wording of error messages, and the dry-run configuration format.
 
+### Implementation decisions (gaps settled; for the owner to review)
+
+Settled during implementation. Details and rationale are in `docs/implementation-plan.md`
+(IDs match); verified HA facts are in `docs/research-notes.md`.
+
+| ID | Gap | Decision |
+|---|---|---|
+| I1 | Restart lower bounds, wake-ups | Time quantities are intervals that move with the clock; one mechanism gives exact wake-ups and D17's "at least since boot" bounds |
+| I2 | Glitch-free evaluation | Waves in topological order; machines are sources and settle (chains) before bindings and actions run |
+| I3 | Ranges | `now in A..B` is true when `A` occurred more recently than `B` (start inclusive, end exclusive) |
+| I4 | DST | Non-existent wall times resolve to the first instant after the gap; ambiguous ones to the first occurrence |
+| I5 | `sunset` with `sun.sun` unavailable | Solar times are computed from HA's location (astral), not read from `sun.sun` |
+| I6 | `every D` | Aligned to local midnight (`every 15min` ticks at :00/:15/…) |
+| I7 | `count(x, D)` | Exact event timestamps, window `(now − D, now]` |
+| I8 | Machine states | Results must be string literals or `previous(self)`, so the state set is closed |
+| I9 | Lexical details | Identifiers as Python; segments after `.` may start with a digit; `#` comments; single-line strings with `\\ \" \' \n \t`; tabs in indentation are errors |
+| I10 | Continuation | More-indented lines not starting with `\|` continue the statement or arm (all statements, not only arms) |
+| I11 | Names vs domains | Local names shadow builtins, which shadow HA domains (needed for `let remote = …; remote.press`) |
+| I12 | `??` precedence | One level tighter than comparisons; comparisons don't chain |
+| I13 | `latest` with `\|` groups | Group competes by its guard's occurrence time; sub-arms are a first-match cascade |
+| I14 | Entity types | Inferred from domain, then attributes/current state; `any` when unsure |
+| I15 | Units | Only `%` is interpreted (scaled for light `brightness`); other units compare as plain numbers |
+| I16 | Time arithmetic | `ts − ts → duration`, `ts ± duration`, `time-of-day ± duration`; clock-moving values must be compared before use as results |
+| I17 | Cycles | `let` and binding cycles are errors (except via `manual()`); state machines break cycles |
+| I18 | Writer read-back | `on(...)` matches when every given parameter matches; per-attribute tolerances; transitional states match their goal; `text.*` accepted like `input_text.*` |
+| I19 | Error format | `file:line:col: error: …`, caret snippet, optional `hint:` |
+| I20 | Dry run | `# mode: dry_run` directive or an integration option; logs would-be calls |
+
 ### Repository state
 
 - **Repository name:** the GitHub repo is `ddfisher/ha-homeo` (formerly `ddfisher/ha-dsl`).

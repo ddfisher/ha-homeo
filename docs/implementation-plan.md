@@ -1,0 +1,364 @@
+# Homeo: implementation and testing plan
+
+Companion to `docs/design.md` (the spec) and `docs/research-notes.md` (verified HA facts).
+This document says **how** v1 gets built and tested, and records the decisions taken where the
+spec left gaps. Each such decision has an ID (`I1`, `I2`, …), is summarised in the design doc's
+"Implementation decisions" section, and is flagged to the owner for review.
+
+---
+
+## 1. Architecture in code
+
+```
+custom_components/homeo/
+  manifest.json, hacs-facing metadata, strings.json, translations/en.json, services.yaml, brand/
+  __init__.py        config-entry setup, file polling, reloads, services (homeo.reload, homeo.explain)
+  config_flow.py     single-instance config flow
+  host.py            HassHost: the HA implementation of the core's Host interface
+  select.py          select.homeo_<name> entities for state machines (RestoreEntity)
+  logbook.py         describes homeo_rule_fired events (logbook attribution)
+  core/              host-agnostic; must not import homeassistant (enforced by a test)
+    errors.py        Diagnostic (file, line, col, message, hint) + caret formatting
+    lexer.py         tokens with line/col and per-line indentation
+    ast.py           dataclass AST
+    parser.py        Pratt expressions + layout-aware statements and arm blocks
+    types.py         static types
+    checker.py       name resolution, type checking, target/writer checks, cycles → Program IR
+    values.py        runtime values: Unknown, Keep, OnSpec, Days, time intervals
+    timeutil.py      time-of-day, daily time points, ranges, DST handling
+    writers.py       per-target service mapping and read-back matching
+    runtime.py       cells, propagation, scheduling, bindings, machines, actions
+    host.py          Host protocol (what the runtime needs from its environment)
+tests/
+  core/              fast unit tests with a FakeHost and simulated clock
+  integration/       pytest-homeassistant-custom-component tests
+hacs.json
+```
+
+The core lives inside the integration directory because HACS only ships
+`custom_components/homeo/` (research notes §2). It stays importable and testable on its own.
+
+### Pipeline
+
+`text → lexer → parser → AST → checker (with an EntityCatalog from the host) → Program → Runtime`
+
+- **Program** (checker output) is a list of definitions, machines, bindings and actions whose
+  expressions are resolved: every name points at an entity read, a `let`, a machine, or a
+  builtin, and every node carries its static type.
+- **Runtime** turns a Program into a graph of **cells** and runs it against a Host.
+
+### Host interface (core/host.py)
+
+```python
+class Host(Protocol):
+    def now(self) -> float                          # UTC epoch seconds
+    boot_time: float                                # when HA (or the fake) started
+    tz: tzinfo                                      # local time zone
+    def get_state(self, entity_id) -> EntityState | None   # state, attributes, last_changed, last_updated
+    def subscribe_states(self, entity_ids, cb) -> Unsub     # cb(StateChange) incl. `ours: bool`
+    def subscribe_bus(self, event_type, cb) -> Unsub        # cb(event_data: dict, time)
+    def schedule(self, when: float, cb) -> Unsub
+    def call_service(self, call: ServiceCall) -> None       # host creates + remembers the Context
+    def solar(self, event: str, day: date) -> float | None  # sunrise/sunset/dawn/dusk for a local date
+    def log(self, level, message) -> None
+```
+
+The checker needs a separate read-only `EntityCatalog` (exists? domain, current state and
+attributes for type inference, event types). Both HassHost and FakeHost provide one.
+
+---
+
+## 2. Runtime model
+
+### 2.1 Values
+
+| Static type | Runtime representation |
+|---|---|
+| `bool` | `True` / `False` |
+| `number` | `Num` (see below); `%` literals carry a `percent` flag |
+| `string` | `str` |
+| `duration` | `Num` (seconds) |
+| `timestamp` | `Num` (UTC epoch seconds) |
+| `time-of-day` | `DailyTime` (fixed `hh:mm[:ss]` or solar event + offset), resolved per local date |
+| `day` | `Days` (a set of weekdays) |
+| `on(...)` | `OnSpec(params)` |
+| list | tuple |
+| any | `UNKNOWN` sentinel |
+| `keep` | `KEEP` sentinel (only legal as a binding/arm result) |
+
+**I1. Time quantities are intervals that move with the clock.** A `Num` is
+`[lo, hi]` plus a rate for each bound (how fast it changes per second of wall time). Ordinary
+numbers are exact (`lo == hi`) with rate 0. `now` is exact with rate 1; `age(x)` is
+`now − t(x)`, also rate 1.
+
+This one representation gives three things the design asks for, with no special cases:
+- **Exact wake-ups (D10).** Comparing two moving values tells us exactly when the comparison
+  flips (solve `lo/hi` crossings), so the runtime schedules a wake-up instead of polling.
+- **Restart lower bounds (D17 rule 2).** A change time from before boot is the interval
+  `(−∞, boot]`. Then `age(x)` is `[now − boot, ∞)`, and a comparison is definite only when the
+  whole interval is on one side, else `unknown`. `age(x) > 1h` becomes true 1 h after boot;
+  `age(x) < 10min` is unknown for 10 minutes, then false. `latest` and `fresh()` compare
+  intervals the same way, so two pre-boot times can't be ordered (unknown) while a post-boot
+  time beats any pre-boot one.
+- **Partial knowledge at load.** HA's `last_changed` is exact when it's later than boot (it can
+  only come from a real change), so entity state cells start with an exact change time in that
+  case. Attributes only know "at or before `last_updated`": `(−∞, last_updated]`.
+
+A bound of `−∞` together with a `maybe_never` flag represents "never happened, or happened
+before we started watching" (e.g. a bool that is false at load). `latest` takes its `else` only
+when every condition has *definitely* never happened (e.g. a button whose state is `unknown`).
+
+### 2.2 Cells and change times
+
+The runtime builds a **cell** for each thing whose history matters:
+- every entity read (`entity`, `entity.attr`, `event.x.type`, `manual(e)`, `bus.e(...)`, `every D`,
+  time points) — shared across files, keyed by what they read;
+- every `let`, state machine, binding and action header;
+- every argument of a history construct (`age`, `fresh`, `latest` conditions, `on`, `previous`,
+  `toggle`, `count`; `for` after expansion).
+
+Everything else is a pure expression evaluated inside the cell that contains it.
+
+A cell stores: current value, last known value, change time `ct` (an interval), `t_true` (when a
+bool last became true), previous value, and its next wake-up time. Per D16, change times skip
+`unknown`: if a value goes `A → unknown → A`, `ct` doesn't move.
+
+`t(x)` (design §3) is the value itself for timestamp cells, and `t_true` for bool cells.
+
+### 2.3 Propagation (glitch-free)
+
+**I2. Evaluation runs in waves, in topological order.** Cells get a static rank (topological
+order of the dependency graph, built at compile time). An input change (state change, bus event,
+wake-up, `select` change, reload) marks source cells dirty; one wave recomputes dirty cells in
+rank order, each at most once, and marks dependents dirty only when a value or change time
+actually changed. So no binding, machine or action ever sees a half-updated state.
+
+State machines are **sources** in the graph (their arms read the machine's pre-update value,
+D13b, so the machine's own value feeds its arms through a one-step delay rather than an edge):
+
+```
+loop:
+    run a wave over dirty cells
+    evaluate each machine whose arm inputs changed (or that just transitioned)
+    if none transitioned: break
+    apply transitions (ct = now), mark machines dirty; if a machine repeats a value in this
+    loop, report a loop error and stop that machine (D13b)
+then: run bindings and actions on the settled values
+```
+
+Bindings and actions run once, after all machines settle, so a chain of transitions produces
+one write.
+
+### 2.4 Time
+
+- **Wake-ups.** Evaluating a cell collects the earliest future instant at which time alone could
+  change its value (crossings of moving `Num`s, the next boundary of a time range, the next
+  occurrence of a time point, the next tick of `every`, the next expiry in a `count` window).
+  The runtime keeps one host timer for the earliest wake-up across all cells.
+- **I3. Time-of-day ranges** `now in A..B` are true when the most recent occurrence of `A`
+  is later than the most recent occurrence of `B` (start inclusive, end exclusive). This handles
+  wrapping midnight and solar times uniformly. `A == B` is an empty range.
+- **I4. DST.** Daily times are resolved per local date with `zoneinfo`. A wall-clock time that
+  doesn't exist that day (spring forward) resolves to the first instant after the gap; an
+  ambiguous one (fall back) resolves to its first occurrence. So a daily time point fires
+  exactly once per local day.
+- **I5. Solar times** come from HA's location via `homeassistant.helpers.sun` (astral), not from
+  the `sun.sun` entity, so they're always available. A day without that event (polar
+  regions) has no occurrence that day. A time point uses the most recent day that has one.
+- **I6. `every D`** is aligned to the clock in local time: ticks at multiples of `D` since local
+  midnight (`every 15min` → :00, :15, :30, :45), so it's predictable and survives reloads and
+  restarts. `D` must divide 24 h; otherwise ticks count from the Unix epoch, and the checker warns.
+- **I7. `count(x, D)`** counts occurrences with exact timestamps (event times or the moment a bool
+  became true) in the window `(now − D, now]`, and schedules a wake-up when the oldest falls out.
+- **`now`** is a timestamp (moving, rate 1). **`today`** is a `day`. `now` compared with a
+  time of day compares local wall-clock time.
+
+### 2.5 Bindings (D5, D15, D16, D17)
+
+Per binding, the runtime keeps `last_known_result` and `last_written`:
+- result `unknown` → leave the device alone, keep `last_known_result`;
+- result `keep` → leave the device alone, clear `last_known_result` (so the device state stands
+  in when `keep` ends);
+- known result `R`:
+  - if there's a `last_known_result`, write iff `R != last_known_result`;
+  - otherwise write iff the device doesn't already match `R` (writer read-back);
+  - then `last_known_result = R`.
+
+Reloads carry `last_known_result` and `last_written` over by target id (D17 rule 6). A failed
+service call is logged; it isn't retried.
+
+### 2.6 Manual changes (D21)
+
+The host tags each state change with `ours` (its context id is one we issued; HassHost keeps a
+bounded set). For an entity with a binding, a change is manual iff it's not ours, the new state
+doesn't match `last_written` (writer read-back with tolerance; if nothing was written yet, any
+real change counts), and neither old nor new state is `unavailable`/`unknown`. A manual change
+sets `manual(entity)` to the change time.
+
+### 2.7 Actions (D14)
+
+Each action keeps `last_handled` (starts at load time, carried over on reload by its canonical
+header text). When `t(x)` becomes definitely later than `last_handled`: set `last_handled = t(x)`,
+then run the body if the `if` guard is definitely true. Service calls are issued in order without
+waiting (no `sleep`/`wait` in v1).
+
+### 2.8 State machines (D13)
+
+Values are strings. Restored on restart from the `select` entity: value from the state, change
+time from extra restore data (research notes §5). On reload, a machine keeps its value if that
+value still exists in the new definition (D13f), and its change time with it.
+
+**I8. A machine's states must be closed.** Arm results must be string literals or
+`previous(<self>)`, and the initial value a string literal. That's what makes compile-time
+checking of `m == "boots"` (D13c) and the `select` entity's options possible.
+
+---
+
+## 3. Language details (spec gaps)
+
+**I9. Lexical rules.**
+- Identifiers: `[A-Za-z_][A-Za-z0-9_]*`. After a `.` (no space), a segment may start with a
+  digit, since HA object ids can (`sensor.0x1234_temp`).
+- Comments: `#` to end of line. `# mode: dry_run` on its own line before any statement is a file
+  directive.
+- Strings: `"…"` or `'…'`, single line, escapes `\\ \" \' \n \t`. Unknown escapes are errors.
+- **Tabs in indentation are an error** ("indent with spaces"). Indentation width is free but
+  must be consistent within a block.
+- Durations: a number directly followed by `s`, `min`, `h` or `d`; compounds like `1h30min`;
+  decimals allowed (`1.5h`). Percent: `50%`. Times: `7:00`, `07:00`, `07:00:30`.
+- Inside `(…)` and `[…]`, line breaks are ignored.
+
+**I10. Layout and continuation.**
+- A statement (or arm) continues onto following lines that are **more indented** than the line
+  it started on and don't start with `|` (design §8, generalised to all statements).
+- A line ending in `:=`, `= latest`/`:= latest`, or `:` (after `state …` or `on …`) opens an
+  indented block. In arm blocks, every arm starts at the block's indentation; `|` lines indented
+  further are sub-arms of the guard above them.
+- `on x: call()` on one line is allowed, as is a body block.
+
+**I11. Name resolution order.** A dotted name `a.b.c` resolves `a` as: a `let`/`state` name in
+this file; else a builtin (`now`, `today`, `sunrise`, `sunset`, `dawn`, `dusk`, day names); else
+an HA domain (entity id `a.b`, with `.c` an attribute or an event type). So local names shadow
+domains: the design's own example uses `let remote = event.bathroom_remote` and then
+`remote.press`, while `remote` is also an HA domain. `sun.sun` still works because `sun` the day
+is only taken when there's no dot.
+
+**I12. `??` binds slightly tighter than comparisons.** The design puts them in one row; one
+level tighter makes `co2 ?? 0 > 800` and `800 < co2 ?? 0` both mean what they look like.
+Comparisons don't chain (`a < b < c` is an error with a hint).
+
+**I13. `latest` with `|` groups.** A group competes with the occurrence time of its guard; its
+sub-arms are then a first-match cascade that picks the result. If no sub-arm matches, the group
+doesn't count and the next most recent arm wins.
+
+**I14. Types for entities** (inferred at load from domain, then attributes):
+- bool: `binary_sensor`, `input_boolean`, `switch`, `light`, `fan`, `siren`, `automation`,
+  `remote`, `script`, `group` with on/off state;
+- timestamp: `event`, `input_button`, `button`, `scene`, `sensor` with `device_class: timestamp`;
+- number: `input_number`, `number`, `counter`, `sensor` with a `unit_of_measurement` or
+  `state_class`, or whose current state parses as a number;
+- string: everything else (`person`, `select`, `climate`, `cover`, `lock`, …);
+- attributes: from the current attribute value's Python type; `any` if absent.
+- `any` is accepted wherever a specific type is expected, and converted at run time
+  (non-convertible → `unknown`, per D4).
+
+**I15. Units.** Units other than `%` are not interpreted: values compare as plain numbers. `50%`
+compares as 50 with numbers, except with a light's `brightness` attribute (0–255), where it's
+scaled (as the design says for read-back). Comparing `%` with a sensor whose unit is something
+else (e.g. `°C`) is a type error with a hint.
+
+**I16. Arithmetic.** `timestamp − timestamp → duration`; `timestamp ± duration → timestamp`;
+`duration ± duration → duration`; `duration * number`, `duration / number → duration`;
+`duration / duration → number`; `time-of-day ± duration → time-of-day` (as in `sunset − 30min`).
+A value that moves with the clock (e.g. raw `age(x)`) can't be a binding result or a machine
+state; it must be compared first (checker error with a hint).
+
+**I17. Cycles.** `let` cycles are errors. A binding that reads its own target, directly or
+through `let`s or other bindings, is an error, except through `manual()` (D15). State machines
+break cycles (their arms see the previous value), so a binding may feed a machine that feeds the
+binding; runaway oscillation is caught by the runtime's loop detection.
+
+**I18. Writers: read-back tolerance and multi-attribute match.**
+- `on(...)` matches when the state is `on` and **every given parameter** matches; parameters not
+  given aren't compared.
+- Tolerances: light brightness ±3 on the 0–255 scale; colour temperature ±2% (mired rounding);
+  fan percentage ± half of `percentage_step` (min 1); climate setpoint ± half of
+  `target_temp_step` (default 0.25); cover position ±1; media volume ±0.01; `number` values
+  ± half of `step` if present.
+- Transitional states (`opening`, `closing`, `locking`, `unlocking`) match the state they're moving
+  towards, so a slow cover isn't re-commanded mid-travel.
+- `text.x` is accepted like `input_text.x` (the same `set_value` service), for symmetry with
+  `number`/`input_number` and `select`/`input_select`.
+
+**I19. Error messages** are `file:line:col: error: message`, then the source line with a caret
+under the span, then an optional `hint:` line. Multiple errors per file are reported (the checker
+keeps going after an error where it can).
+
+**I20. Dry run.** A `# mode: dry_run` directive (or the integration option "dry run all files")
+makes writes and actions log at INFO (`[dry run] would call light.turn_on {...}`) instead of
+calling services. Bindings still update `last_known_result` as if they had written.
+
+---
+
+## 4. Build order and milestones
+
+| # | Milestone | Done when |
+|---|---|---|
+| M1 | Lexer + parser | every example in the design parses; precedence table cases; layout/continuation; good syntax errors |
+| M2 | Checker | names, types, targets, writers, one-writer rule across files, `else` rules, `fresh`/`on` placement, state checks, cycles; each design-listed compile error has a test |
+| M3 | Runtime core | cells, waves, wake-ups, cascades, `latest`, `age`/`for`, history functions, machines, actions, bindings, manual detection, restart and reload semantics, against FakeHost |
+| M4 | Writers | service mapping and read-back for the full v1 table |
+| M5 | HA integration | config flow, HassHost, file polling + atomic reloads, `select` entities with restore, repairs issues, contexts + logbook, `homeo.reload`, dry run |
+| M6 | Tooling | `homeo.explain` (per-subexpression values, active arm, sugar expanded); optional diagnostic sensor |
+| M7 | Editor panel | sidebar panel, syntax highlighting, inline errors via websocket `check`, save |
+| — | Release | `hacs.json`, brand icon, LICENSE, README, CI (pytest, hassfest, HACS action), first GitHub release |
+
+---
+
+## 5. Testing plan
+
+**Core unit tests (`tests/core`, no HA needed at run time).**
+- `FakeHost`: in-memory entity states, a simulated clock (`advance(seconds)` runs due timers in
+  order and moves `now` to each timer's time), recorded service calls, a `set_state(...)` that
+  mimics HA (keeps `last_changed` when the state string is unchanged; `ours` flag for writes
+  echoed back), a fixed time zone and stub solar times.
+- Lexer: token kinds, positions, durations/percent/time literals, indentation, tabs, strings and
+  escapes, errors.
+- Parser: AST for every snippet in the design (§5–§21), precedence table (§20) one case per row,
+  layout and continuation, error positions and messages.
+- Checker: one test per compile error the design names (unknown entity with "did you mean",
+  `let` on the left of `:=`, two writers for one target across files, light attribute bound
+  separately, cover state + position, missing `else`, `fresh` outside `state`, `on` nested,
+  service call on a bound entity, timestamp misuse hint, state typo, read-only target, cycles,
+  moving values as results).
+- Runtime scenarios, each a small rule file plus a scripted timeline: cascades and arm switching,
+  temporary overrides expiring, `latest` hysteresis and ties, `age` wake-ups at the exact
+  instant, `for`, three-valued logic, dropouts not moving change times, every §17 rule-2 example
+  after a simulated restart, machine chains, `fresh`, timeouts and loop detection, actions
+  (`if` vs `and`, once per occurrence, nothing at load), manual detection (ours / late echo /
+  availability), reload semantics, time ranges across midnight, DST transitions, solar times,
+  `every`, `count`, `toggle`, `previous`.
+- Golden test: the full example (§21) loaded and driven through a scripted day.
+- A guard test that no module under `core/` imports `homeassistant`.
+
+**Integration tests (`tests/integration`, pytest-homeassistant-custom-component).**
+- Setup through a `MockConfigEntry`; rule files written to a temp config dir.
+- Bindings call the right services (`async_mock_service`) with our context; echoes of our writes
+  aren't manual; a state change with a foreign context is.
+- File edits trigger an atomic reload; a broken file creates a repairs issue and keeps old rules;
+  fixing it deletes the issue.
+- `select.homeo_*` entities: options, UI selection drives the machine, restore (with
+  `mock_restore_cache_with_extra_data`) keeps value and change time.
+- Startup waits for `started`; time points use `async_fire_time_changed`.
+- Logbook attribution via the `homeo_rule_fired` event.
+
+**Tooling.** `pytest` with `asyncio_mode = auto`; `ruff` for lint/format. CI runs core tests on
+Python 3.13 and 3.14, and integration tests on the latest HA (Python 3.14), plus `hassfest` and
+the HACS action.
+
+---
+
+## 6. Progress log
+
+- **Session 1:** research notes, this plan; started M1–M3 (see git history and test suite for
+  what's in).
