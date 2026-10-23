@@ -476,7 +476,8 @@ M5 as built:
    it with real physical devices is still worthwhile.
 2. ~~Add `hassfest` and the HACS action to CI; add a test for removing stale `select`
    entities~~ (done; `hassfest` also passes when run locally from HA core's source). The HACS
-   action ignores the repository's description and topics until they're set on GitHub.
+   action only runs once the repository is public (it can't validate private ones), and
+   ignores the description and topics until they're set on GitHub.
 3. M6: `homeo.explain` (per-subexpression values, the active arm, sugar expanded). The IR's
    `text` fields and the cells' change times are the raw material.
 4. M7: the editor panel.
