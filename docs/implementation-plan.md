@@ -368,7 +368,7 @@ the HACS action.
 
 ### Session 1
 
-Done (255 tests: 245 core, 10 integration):
+Done (256 tests: 245 core, 11 integration):
 - **M1** lexer + parser (`core/lexer.py`, `core/parser.py`, `core/ast.py`, `core/printer.py`).
   All complete examples in the design parse.
 - **M2** checker (`core/checker.py`, `core/ir.py`, `core/types.py`): every compile error the
@@ -393,8 +393,9 @@ Notes from implementation:
   as the design's comment says.
 
 Next:
-- M5 polish: `homeo.explain` hooks, diagnostics for entities that appear after load (rules
-  referencing entities from integrations that load late currently fail to compile until the
-  next reload; consider retrying on `EVENT_COMPONENT_LOADED`), stale `select` entity cleanup
-  tests, a LICENSE (owner's choice) and hassfest/HACS CI checks before a first release.
+- M5 polish: tests for stale `select` entity cleanup, a LICENSE (owner's choice), a real brand
+  icon, and hassfest/HACS CI checks before a first release.
+- Rules are compiled once HA has started; files with errors are retried whenever the set of
+  entities changes, so rules referencing entities from late-loading integrations recover on
+  their own.
 - M6 tooling, M7 editor panel.

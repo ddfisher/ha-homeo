@@ -204,3 +204,18 @@ async def test_config_flow_single_instance(hass: HomeAssistant):
     assert result["type"] == "create_entry"
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
     assert result["type"] == "abort"
+
+
+async def test_files_with_errors_retry_when_entities_appear(
+    hass: HomeAssistant, setup_homeo, freezer
+):
+    hass.states.async_set("switch.pump", "off")
+    turn_on = async_mock_service(hass, "switch", "turn_on")
+    entry = await setup_homeo({"late.homeo": "switch.pump := binary_sensor.late_one\n"})
+    assert "late.homeo" in entry.runtime_data.errors
+    hass.states.async_set("binary_sensor.late_one", "on")  # its integration loads later
+    freezer.tick(timedelta(seconds=3))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert "late.homeo" not in entry.runtime_data.errors
+    assert len(turn_on) == 1

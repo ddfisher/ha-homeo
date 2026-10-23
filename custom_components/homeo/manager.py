@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_interval
@@ -76,6 +76,8 @@ class HomeoManager:
         self.machine_entities: dict[str, MachineSelect] = {}
         self._unsubs: list[Callable[[], None]] = []
         self._reloading = False
+        self._started = False
+        self._entity_count = 0  # entities known at the last compile
 
     @property
     def dry_run(self) -> bool:
@@ -84,14 +86,20 @@ class HomeoManager:
     # ------------------------------------------------------------- lifecycle
 
     async def async_start(self) -> None:
-        await self.async_reload()
-        self._unsubs.append(async_track_time_interval(self.hass, self._async_poll, POLL_INTERVAL))
+        # Compile and run once HA has started (D17 rule 1), so entities from integrations
+        # that load after us exist and have states to infer types from.
         self._unsubs.append(async_at_started(self.hass, self._async_started))
 
-    @callback
-    def _async_started(self, _hass: HomeAssistant) -> None:
+    async def _async_started(self, _hass: HomeAssistant) -> None:
         self.host.boot_time = self.host.now()
+        self._started = True
+        await self.async_reload()
         self.runtime.start()
+        self._unsubs.append(
+            async_track_time_interval(
+                self.hass, self._async_poll, POLL_INTERVAL, cancel_on_shutdown=True
+            )
+        )
 
     async def async_stop(self) -> None:
         for u in self._unsubs:
@@ -106,18 +114,25 @@ class HomeoManager:
             return
         stats = await self.hass.async_add_executor_job(_stat_rule_files, self.directory)
         known = {name: (f.mtime, f.size) for name, f in self.files.items()}
-        if stats != known:
+        # Files with errors are retried when entities appear (e.g. a late integration).
+        if stats != known or (self.errors and self._count_entities() != self._entity_count):
             await self.async_reload()
+
+    def _count_entities(self) -> int:
+        return len(self.hass.states.async_entity_ids()) + len(er.async_get(self.hass).entities)
 
     async def async_reload(self) -> None:
         """Re-read and recompile all files. A file with errors keeps its previous version
         running and gets a repairs issue (§2, §19)."""
+        if not self._started:
+            return
         self._reloading = True
         try:
             files = await self.hass.async_add_executor_job(_read_rule_files, self.directory)
         finally:
             self._reloading = False
         self.files = files
+        self._entity_count = self._count_entities()
         self.apply(self.compile_all(files))
 
     def compile_all(self, files: dict[str, RuleFile]) -> dict[str, Program]:
