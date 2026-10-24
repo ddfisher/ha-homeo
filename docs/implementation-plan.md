@@ -311,7 +311,8 @@ else (e.g. `°C`) is a type error with a hint.
 
 **I16. Arithmetic.** `timestamp − timestamp → duration`; `timestamp ± duration → timestamp`;
 `duration ± duration → duration`; `duration * number`, `duration / number → duration`;
-`duration / duration → number`; `time-of-day ± duration → time-of-day` (as in `sunset − 30min`).
+`duration / duration → number`; `time-of-day ± duration → time-of-day` (as in `sunset − 30min`);
+`timestamp − time-of-day` and `time-of-day − time-of-day → duration` (I24).
 A value that moves with the clock (e.g. raw `age(x)`) can't be a binding result or a machine
 state; it must be compared first (checker error with a hint).
 
@@ -370,6 +371,24 @@ ahead of HA's. Earlier than that, it was moved (or dismissed), not reached. So
 event from the device itself if it has one. Other wake-ups (`for`, `age()` thresholds, time
 points) can still race a state change by a few milliseconds; that's within what sensors can
 resolve anyway.
+
+**I24. Times of day from entities.** A time-only `input_datetime` helper (`has_time` without
+`has_date`; state `20:00:00`) and a `time.*` entity are times of day, so they work wherever a
+written time does: in ranges (`now in input_datetime.dim_start..input_datetime.dim_end`),
+compared with `now`, shifted by a fixed duration (`input_datetime.x + 30min`), and as time
+points (`on input_datetime.x:`, `age(…)`, `latest`/`fresh` arms). When the helper changes, ranges
+and time points follow at once. Two subtractions make ramps possible: `timestamp − time of day`
+is the time since it last happened at or before that timestamp (`every 5min - start`; with
+`now`, it moves with the clock and starts again from zero at each occurrence), and
+`time of day − time of day` is how long from the second to the first by the wall clock, wrapping
+midnight (`end - start`). Solar times move from day to day, so they can't be subtracted (use
+`age(sunset)`). An `input_datetime` with a date stays a string for now.
+
+**I25. Light `transition`.** `on(brightness: 40%, transition: 5min)` sends `transition` (in
+seconds) with `light.turn_on`. It says how to get there, not where to be, so it's never compared
+with the device (I18). While a transition runs, the light's progress reports (which arrive with
+a fresh context once HA stops reusing ours, as for a moving cover) don't count as manual changes
+(D21); after it ends, a change away from what was written does. `off` takes no transition yet.
 
 **I21. `homeo.explain`** (§19) is a service that returns a response (Developer tools → Actions
 shows it as YAML; automations can use it too). Its `target` is a binding target
@@ -512,7 +531,7 @@ M5 as built:
 
 ### What has been verified, and what hasn't
 
-- 302 Python tests: 279 core (FakeHost, simulated clock), 23 integration
+- 352 Python tests: 328 core (FakeHost, simulated clock), 24 integration
   (`pytest-homeassistant-custom-component`). They pass on HA 2026.10.2 / Python 3.14 (the CI
   setup) and on HA 2026.2.3 / Python 3.13 (the minimum in `hacs.json`). The full suite passed
   100 consecutive runs after the watcher's shutdown races were fixed.

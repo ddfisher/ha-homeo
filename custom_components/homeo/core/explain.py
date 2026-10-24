@@ -330,8 +330,8 @@ class _Explainer:
             case ir.InTimeRange(start=start, end=end):
                 # its parts: the time now, and when each bound last happened (solar ones move)
                 out.setdefault("now", self.instant(self.rt.now))
-                for bound in (start, end):
-                    if bound.solar is not None:
+                for bound in (start, end):  # a node bound (an entity) is listed as a child
+                    if isinstance(bound, DailyTime) and bound.solar is not None:
                         out.setdefault(repr(bound), self.last_time(bound))
             case ir.DayIn():
                 weekday = datetime.fromtimestamp(self.rt.now, self.tz).strftime("%a").lower()

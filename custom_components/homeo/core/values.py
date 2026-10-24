@@ -224,6 +224,18 @@ class Days:
         return "{" + ",".join(DAY_NAMES[d] for d in sorted(self.days)) + "}"
 
 
+def parse_time_of_day(raw: object) -> DailyTime | object:
+    """A time-of-day entity's state (`input_datetime` without a date, `time.*`): `HH:MM:SS`,
+    maybe with fractions of a second. Anything else is unknown."""
+    from datetime import time
+
+    try:
+        t = time.fromisoformat(str(raw))
+    except ValueError:
+        return UNKNOWN
+    return DailyTime(t.hour * 3600 + t.minute * 60 + t.second)
+
+
 def parse_timestamp(s: str) -> float | None:
     """UTC epoch seconds of an ISO 8601 timestamp with a time zone (HA's format), else None."""
     try:

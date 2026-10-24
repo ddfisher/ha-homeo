@@ -9,7 +9,11 @@ import { BUILTINS, FUNCTIONS, KEYWORDS } from "./language.js";
 /** The settings `on(...)` takes, per bound domain. Mirrors the writers' `on_params`
  * (LIGHT_PARAMS and FAN_PARAMS in core/writers.py; a Python test keeps them in step). */
 export const ON_SETTINGS = {
-  light: { brightness: "a percentage, e.g. 50%", kelvin: "colour temperature, e.g. 2700" },
+  light: {
+    brightness: "a percentage, e.g. 50%",
+    kelvin: "colour temperature, e.g. 2700",
+    transition: "how long to take, e.g. 5min",
+  },
   fan: { percentage: "speed, e.g. 60%" },
 };
 

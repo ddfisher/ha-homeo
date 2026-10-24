@@ -184,7 +184,7 @@ rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts ar
 | I13 | `latest` with `\|` groups | Group competes by its guard's occurrence time; sub-arms are a first-match cascade |
 | I14 | Entity types | Inferred from domain, then attributes/current state; `any` when unsure |
 | I15 | Units | Only `%` is interpreted (scaled for light `brightness`); other units compare as plain numbers |
-| I16 | Time arithmetic | `ts − ts → duration`, `ts ± duration`, `time-of-day ± duration`; clock-moving values must be compared before use as results |
+| I16 | Time arithmetic | `ts − ts → duration`, `ts ± duration`, `time-of-day ± duration`, `ts − time-of-day` and `time-of-day − time-of-day → duration` (I24); clock-moving values must be compared before use as results |
 | I17 | Cycles | `let` and binding cycles are errors (except via `manual()`); state machines break cycles, with a warning when a binding's target feeds back into its own rule through a machine (the runtime can't stop that loop) |
 | I18 | Writer read-back | `on(...)` matches when every given parameter matches; per-attribute tolerances; transitional states match their goal; `text.*` accepted like `input_text.*` |
 | I19 | Error format | `file:line:col: error: …`, caret snippet, optional `hint:` |
@@ -192,6 +192,8 @@ rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts ar
 | I21 | `homeo.explain` | A service with a response; target = binding target, entity, machine or `let` name; per arm: condition value, subexpression values (sugar expanded, `let` names kept), active arm; plus summary, device state, last write |
 | I22 | Editor panel | CodeMirror 6, bundled into one committed module (HACS ships only `custom_components/homeo/`); admin-only websocket API (`homeo/files`, `files/subscribe`, `file/read`, `file/check`, `file/save`, `file/delete`, `explain`); errors checked as you type against the other running files; save reloads at once; Explain follows the cursor; unsaved edits kept across pages; saves refuse to overwrite edits made elsewhere |
 | I23 | Future timestamps | `t(x)` is the most recent value at or before now; a future value happens when its time comes. Before one has been seen to pass, the last occurrence is "some time before now" (as for pre-restart times), so `age(x)` is a lower bound. A value replaced once its time has come (or at most 1 s before, for clock skew) happened |
+| I24 | Times of day from entities | Time-only `input_datetime` helpers and `time.*` entities work wherever a written time does (ranges, `now` comparisons, `+ 30min`, time points), following the helper when it changes; `ts − time-of-day` and `time-of-day − time-of-day` give durations, for ramps |
+| I25 | Light `transition` | `on(…, transition: 5min)`: sent, never read back; the light's progress reports during it aren't manual changes |
 
 ### Repository state
 
@@ -396,7 +398,7 @@ v1 writers:
 | Target | Example | Service call |
 |---|---|---|
 | on/off: `switch`, `fan`, `light`, `input_boolean`, `siren` | `fan.bathroom := on` | `<domain>.turn_on` / `turn_off` |
-| light with settings | `light.hall := on(brightness: 80%, kelvin: 2700)` | `light.turn_on(brightness_pct: 80, color_temp_kelvin: 2700)` |
+| light with settings | `light.hall := on(brightness: 80%, kelvin: 2700, transition: 5min)` | `light.turn_on(brightness_pct: 80, color_temp_kelvin: 2700, transition: 300)` |
 | fan with speed | `fan.bathroom := on(percentage: 60%)` | `fan.turn_on(percentage: 60)` |
 | climate setpoint | `climate.living.temperature := 21` | `climate.set_temperature` |
 | climate mode | `climate.living := "heat"` | `climate.set_hvac_mode` |
@@ -621,6 +623,10 @@ time:
 fresh(07:00) and workday       -> "home"      # 07:00 has passed since entering this state
 on sunset - 30min:                               # action, daily
 ```
+
+A time-only `input_datetime` helper or a `time.*` entity works the same way, so the times can
+be changed from the UI: `now in input_datetime.dim_start..input_datetime.dim_end`,
+`on input_datetime.wake_up:` (I24).
 
 So `07:00` means a time of day inside `now in …` ranges and comparisons, and a time point
 elsewhere. That's unambiguous for the compiler. **Decided:** `fresh(07:00)` as written. We'll
