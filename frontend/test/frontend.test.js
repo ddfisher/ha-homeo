@@ -174,6 +174,21 @@ test("explanation html: implicit else when no arm applies", () => {
   assert.doesNotMatch(explanationHtml({ machine: "mode", arms: groups }), /implicit/);
 });
 
+test("explanation html: an implicit arm from the server has no line", () => {
+  const html = explanationHtml({
+    binding: "light.desk",
+    result: "keep",
+    latest: [
+      { arm: "input_button.desk_on -> on", line: 2, happened: "never" },
+      { arm: "else -> keep", implicit: true, active: true },
+    ],
+  });
+  assert.match(html, /<li class="arm active implicit">/);
+  assert.match(html, /<span class="line">implicit<\/span>/);
+  assert.doesNotMatch(html, /line undefined/);
+  assert.equal(html.match(/implicit<\/span>/g).length, 1); // not added a second time
+});
+
 test("explanation html: code may wrap after an opening bracket", () => {
   const html = explanationHtml({ let: "v", file: "f", value: 1, values: { "age(manual(fan.x)) + f()": 1 } });
   assert.ok(html.includes("age(<wbr>manual(<wbr>fan.x)) + f()"));

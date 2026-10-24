@@ -374,6 +374,57 @@ def test_event_type_filter():
     assert r.new_calls() == []
 
 
+REMOTE_RULE = """
+light.desk := latest
+    event.bathroom_remote.press        -> on(brightness: 10%)
+    event.bathroom_remote.double_press -> on(brightness: 100%)
+    else                               -> off
+"""
+
+
+def remote_pressed(h: FakeHost, event_type: str, ago: float) -> None:
+    types = {"event_types": ["press", "long_press", "double_press"], "event_type": event_type}
+    h.set_state("event.bathroom_remote", h.iso(h.t - ago), types, notify=False)
+
+
+def test_latest_over_event_types_of_one_entity_at_load():
+    """The entity's last event was a double press, so a single press, if any, came strictly
+    before it: the double press wins (it used to be unknown until the next press)."""
+    h = standard_world()
+    remote_pressed(h, "double_press", ago=6 * H)
+    r = Rig(REMOTE_RULE, host=h)
+    assert r.new_calls() == ["light.turn_on light.desk brightness_pct=100"]
+    # and after a restart, with the lamp turned off while HA was down
+    r.restart(changes={"light.desk": ("off", {})})
+    assert r.new_calls() == ["light.turn_on light.desk brightness_pct=100"]
+
+
+def test_latest_over_event_types_of_one_entity_single_press_last():
+    h = standard_world()
+    remote_pressed(h, "press", ago=6 * H)
+    r = Rig(REMOTE_RULE, host=h)
+    assert r.new_calls() == ["light.turn_on light.desk brightness_pct=10"]
+
+
+def test_latest_in_binding_without_else_keeps():
+    """Issue #10: a `latest` binding without `else` leaves the device alone until one of its
+    conditions has happened."""
+    h = standard_world()
+    h.set_state("light.desk", "on", notify=False)
+    r = Rig(
+        """
+light.desk := latest
+    input_button.desk_on       -> on
+    input_button.desk_off      -> off
+""",
+        host=h,
+    )
+    assert r.new_calls() == []  # neither has been pressed: keep
+    r.h.advance(1)
+    r.h.press("input_button.desk_off")
+    assert r.new_calls() == ["light.turn_off light.desk"]
+
+
 def test_toggle_and_previous():
     r = Rig(
         """

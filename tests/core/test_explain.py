@@ -89,6 +89,17 @@ def test_keep_and_manual_override():
     assert e["arms"][0]["values"]["manual(fan.bathroom)"] == "08:01:00 (5min ago)"
 
 
+def test_implicit_else_in_latest_binding():
+    r = Rig("light.desk := latest\n    input_button.desk_on -> on\n")
+    e = one(r, "light.desk")
+    assert e["result"] == "keep"
+    assert e["summary"] == (
+        "light.desk is left as it is (`keep`), because none of the conditions has happened "
+        "yet (no `else`, so `keep`)"
+    )
+    assert e["latest"][-1] == {"arm": "else -> keep", "implicit": True, "active": True}
+
+
 def test_unknown_result():
     r = Rig("switch.pump := sensor.bathroom_co2 > 800\n")
     r.h.set_state("sensor.bathroom_co2", "unavailable")
@@ -124,7 +135,7 @@ fan.bathroom := co2_high ?? false
     high, low = e["latest"]
     assert high["happened"] == "08:01:00 (1min ago)"
     assert high["active"] is True
-    assert low["happened"] == "never, or at or before 08:00:00 (2min ago)"
+    assert low["happened"] == "never, or before 08:00:00 (2min ago)"
     assert "active" not in low
 
 

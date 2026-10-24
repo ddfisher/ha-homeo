@@ -73,8 +73,10 @@ function arm(a) {
     ? `<div class="arm-facts">${facts.map(([k, v]) => `<span class="fact"><span class="k">${k}</span> ${v}</span>`).join("")}</div>`
     : "";
   const sub = isGroup ? `<ul class="arms">${a.arms.map(arm).join("")}</ul>` : "";
-  return `<li class="arm ${state}${isGroup ? " group" : ""}">
-    <div class="arm-head">${mark(kind, label)}<code>${armText(isGroup ? a.guard : a.arm)}</code><span class="line">line ${a.line}</span></div>
+  // An arm the rules don't write out (a `latest` binding's `else -> keep`) has no line.
+  const where = a.implicit ? "implicit" : `line ${a.line}`;
+  return `<li class="arm ${state}${isGroup ? " group" : ""}${a.implicit ? " implicit" : ""}">
+    <div class="arm-head">${mark(kind, label)}<code>${armText(isGroup ? a.guard : a.arm)}</code><span class="line">${where}</span></div>
     ${factsHtml}${values(a.values)}${sub}</li>`;
 }
 

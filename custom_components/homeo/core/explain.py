@@ -223,6 +223,8 @@ class _Explainer:
             return None
         guards = self.guards_to(arms, chosen) or []
         if not guards and chosen.cond is None:
+            if chosen.implicit:
+                return "none of the conditions has happened yet (no `else`, so `keep`)"
             return f"no other arm applies (`else`, line {chosen.span.line})"
         steps = [f"`{g.source or g.text}`" for g in guards] + [f"`{self.cond_text(chosen)}`"]
         return f"{', then '.join(steps)} (line {chosen.span.line})"
@@ -259,7 +261,11 @@ class _Explainer:
                 out["active"] = True
             out["arms"] = [self.arm(s, chosen, True) for s in a.arms]
             return out
-        out = {"arm": a.source or a.text, "line": a.span.line}
+        out = {"arm": a.source or a.text}
+        if a.implicit:
+            out["implicit"] = True  # not written in the file, so it has no line
+        else:
+            out["line"] = a.span.line
         if a.cond is not None:
             out.update(self.condition(a.cond, cascade))
         if a is chosen:
@@ -434,7 +440,7 @@ class _Explainer:
         if lo == hi:
             return self.instant(lo)
         if lo == -math.inf:
-            return f"never, or at or before {self.instant(hi)}"
+            return f"never, or before {self.instant(hi)}"
         return f"between {self.instant(lo)} and {self.instant(hi)}"
 
     def last_time(self, daily: DailyTime) -> str:

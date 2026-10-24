@@ -546,9 +546,14 @@ M5 as built:
 - `latest` over bool conditions that were false at load is `unknown` until one of them happens
   (I1). In the §21 example, `co2_high` is unknown until co2 crosses 700 or 800, as the design's
   comment says.
-- The "`else` required" rule applies to blocks written directly in a binding; a binding that
-  uses a `let` holding a `latest` without `else` gets `unknown` (→ keep) until a condition
+- The "`else` required" rule applies to cascades written directly in a binding. A `latest`
+  written directly in a binding may leave out `else`, which then means `else -> keep`
+  (`homeo.explain` lists it as an arm marked `implicit`, with no line). A binding that uses a
+  `let` holding a `latest` without `else` gets `unknown` (→ left alone) until a condition
   happens.
+- An event type other than the entity's latest event's (`event.remote.press` when the last
+  event was a `double_press`) is known at load only to have happened strictly before that
+  event, so a `latest` over several types of one entity picks the latest one right away.
 - Restart handling follows D17 as written (§2.1): change times after boot are exact, `manual()`
   starts as never happened (a pre-restart manual change is overridden), and `for` on derived
   values waits its full duration after a restart. Owner decision; don't add restart-specific

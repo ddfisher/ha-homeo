@@ -156,6 +156,7 @@ class ArmIR:
     text: str
     source: str = ""  # as written (with `let` names), for homeo.explain
     cond_source: str = "else"
+    implicit: bool = False  # not written: `else -> keep` added to a `latest` binding
 
 
 @dataclass(eq=False, slots=True)
