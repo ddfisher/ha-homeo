@@ -40,6 +40,7 @@ from .values import (
     KEEP,
     NEVER,
     UNKNOWN,
+    DailyTime,
     Days,
     Num,
     OnSpec,
@@ -49,6 +50,7 @@ from .values import (
     kleene_or,
     num_div,
     num_mul,
+    parse_time_of_day,
     parse_timestamp,
     same_value,
 )
@@ -124,6 +126,7 @@ class RSink:
     last_known: Any = NOTHING  # bindings
     last_written: Any = NOTHING  # bindings
     last_handled: float = 0.0  # actions
+    transition_until: float = 0.0  # bindings: a write with `transition` is under way until then
     dry_run: bool = False
 
     @property
@@ -257,10 +260,11 @@ class Runtime:
         for s in self.sinks:
             old = old_sinks.get(s.key)
             if old is not None and type(old.defn) is type(s.defn):
-                s.last_known, s.last_written, s.last_handled = (
+                s.last_known, s.last_written, s.last_handled, s.transition_until = (
                     old.last_known,
                     old.last_written,
                     old.last_handled,
+                    old.transition_until,
                 )
                 if old.dry_run and not s.dry_run:
                     # Dry run turned off: nothing was really written, so bring the device in
@@ -415,10 +419,11 @@ class Runtime:
                     self.sun.update(self.host.get_state(d.entity_id), self.now)
                     return self.sun.snapshot() if self.sun.available else UNKNOWN
                 case ir.TimePointCell():
-                    if d.daily.solar is not None and not self.sun.available:
+                    daily = self._daily(d.daily)
+                    if daily is UNKNOWN or (daily.solar is not None and not self.sun.available):
                         return UNKNOWN
-                    last = last_occurrence(d.daily, self.now, self.host.tz, self.sun.occurrence)
-                    nxt = next_occurrence(d.daily, self.now, self.host.tz, self.sun.occurrence)
+                    last = last_occurrence(daily, self.now, self.host.tz, self.sun.occurrence)
+                    nxt = next_occurrence(daily, self.now, self.host.tz, self.sun.occurrence)
                     if nxt is not None:
                         self._wake_at(nxt)
                     return Num.of(last) if last is not None else NEVER
@@ -481,6 +486,8 @@ class Runtime:
                 return Num.of(float(raw))
             except (TypeError, ValueError):
                 return UNKNOWN
+        if t == T.TIMEOFDAY:
+            return parse_time_of_day(raw)
         if t == T.TIMESTAMP:
             if isinstance(raw, datetime):
                 return Num.of(raw.timestamp())
@@ -607,7 +614,10 @@ class Runtime:
                 v = self._num(self._eval(o))
                 return v.scale(k) if isinstance(v, Num) else UNKNOWN
             case ir.Arith(op=op, left=a, right=b):
-                x, y = self._num(self._eval(a)), self._num(self._eval(b))
+                x, y = self._eval(a), self._eval(b)
+                if isinstance(x, DailyTime) or isinstance(y, DailyTime):
+                    return self._time_of_day_arith(op, x, y)
+                x, y = self._num(x), self._num(y)
                 if not isinstance(x, Num) or not isinstance(y, Num):
                     return UNKNOWN
                 if op == "+":
@@ -635,6 +645,9 @@ class Runtime:
                 return kleene_not(result) if neg else result
             case ir.InTimeRange(start=s, end=e, negate=neg, sun=sun):
                 if sun is not None and not self.sun.available:
+                    return UNKNOWN
+                s, e = self._daily(s), self._daily(e)
+                if s is UNKNOWN or e is UNKNOWN:
                     return UNKNOWN
                 inside, wake = in_range(s, e, self.now, self.host.tz, self.sun.occurrence)
                 self._wake_at(wake)
@@ -673,6 +686,39 @@ class Runtime:
             case ir.Latest(arms=arms):
                 return self._eval_latest(arms)
         raise TypeError(f"can't evaluate {type(n).__name__}")
+
+    def _daily(self, bound: Any) -> Any:
+        """A time-of-day bound: fixed, or the current value of a node (I24)."""
+        if isinstance(bound, ir.Node):
+            v = self._eval(bound)
+            return v if isinstance(v, DailyTime) else UNKNOWN
+        return bound
+
+    def _time_of_day_arith(self, op: str, x: Any, y: Any) -> Any:
+        """I16/I24: time of day ± duration; timestamp − time of day (the time since it last
+        happened); time of day − time of day (how long from the second to the first)."""
+        if x is UNKNOWN or y is UNKNOWN:
+            return UNKNOWN
+        if isinstance(x, DailyTime) and isinstance(y, Num):
+            if not y.exact or y.moving:
+                return UNKNOWN
+            return x.shifted(y.lo if op == "+" else -y.lo)
+        if isinstance(x, DailyTime) and isinstance(y, DailyTime):
+            if x.seconds is None or y.seconds is None:
+                return UNKNOWN  # the checker allows fixed times only
+            return Num.of(((x.seconds + x.offset) - (y.seconds + y.offset)) % 86400)
+        if isinstance(x, Num) and isinstance(y, DailyTime):
+            if x.lo != x.hi:
+                return UNKNOWN  # only known to be within some interval (e.g. before a restart)
+            last = last_occurrence(y, x.lo, self.host.tz, self.sun.occurrence)
+            if last is None:
+                return UNKNOWN
+            if x.moving:  # `now − 20:00` starts again from zero at the next 20:00
+                nxt = next_occurrence(y, self.now, self.host.tz, self.sun.occurrence)
+                if nxt is not None:
+                    self._wake_at(nxt)
+            return Num(x.lo - last, x.hi - last, x.rlo, x.rhi)
+        return UNKNOWN
 
     @staticmethod
     def _num(v: Any) -> Any:
@@ -918,6 +964,7 @@ class Runtime:
     def _write(self, s: RSink, b: ir.BindingDef, v: Any) -> None:
         if not s.dry_run:
             s.last_written = v  # what manual-change detection compares with (D21)
+            s.transition_until = self.now + b.writer.transition(v)
         source = f"{b.file}:{b.span.line}"
         for call in b.writer.calls(b.entity_id, v):
             call = ServiceCall(call.domain, call.service, call.data, call.entity_id, source, b.key)
@@ -1054,6 +1101,8 @@ class Runtime:
             w = s.defn.writer  # type: ignore[union-attr]
             if w.view(ch.old) == w.view(ch.new):
                 continue
+            if ch.time < s.transition_until:
+                continue  # progress of our own `transition` (I25), not a person
             if s.last_written is NOTHING or not w.matches(ch.new, s.last_written):
                 return True
         return False

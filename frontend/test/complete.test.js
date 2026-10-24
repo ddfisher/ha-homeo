@@ -72,12 +72,12 @@ test("domain services and service-only domains in an action body", () => {
 });
 
 test("on(...) settings follow the bound domain", () => {
-  assert.deepEqual(complete("light.hall := on(|").labels, ["brightness", "kelvin"]);
+  assert.deepEqual(complete("light.hall := on(|").labels, ["brightness", "kelvin", "transition"]);
   assert.deepEqual(complete("fan.bathroom := on(perc|").labels, ["percentage"]);
-  assert.deepEqual(complete("let x = on(|").labels, ["brightness", "kelvin", "percentage"]);
+  assert.deepEqual(complete("let x = on(|").labels, ["brightness", "kelvin", "transition", "percentage"]);
   assert.deepEqual(
     complete("light.hall :=\n    switch.pump -> on(brightness: 50%, |").labels,
-    ["brightness", "kelvin"],
+    ["brightness", "kelvin", "transition"],
   );
   assert.equal(complete("light.hall := on(brightness: |"), null); // a value goes here
 });

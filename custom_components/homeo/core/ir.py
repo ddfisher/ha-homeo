@@ -108,10 +108,11 @@ class InList(Node):
 
 @dataclass(eq=False, slots=True)
 class InTimeRange(Node):
-    """`now in start..end` (I3): start occurred more recently than end."""
+    """`now in start..end` (I3): start occurred more recently than end. A bound is a fixed
+    DailyTime, or a node giving one at run time (a time-of-day entity, maybe shifted; I24)."""
 
-    start: Any = None  # DailyTime
-    end: Any = None  # DailyTime
+    start: Any = None  # DailyTime | Node
+    end: Any = None  # DailyTime | Node
     negate: bool = False
     sun: CellDef | None = None  # set when an end is a solar time
 
@@ -228,11 +229,14 @@ class EveryCell(CellDef):
 
 @dataclass(eq=False, slots=True)
 class TimePointCell(CellDef):
-    daily: Any = None  # DailyTime
+    daily: Any = None  # DailyTime, or a node giving one (a time-of-day entity; I24)
     sun: CellDef | None = None  # set for solar times
 
     def deps(self) -> list[CellDef]:
-        return [self.sun] if self.sun is not None else []
+        out = [self.sun] if self.sun is not None else []
+        if isinstance(self.daily, Node):
+            out += node_cells(self.daily)
+        return out
 
 
 @dataclass(eq=False, slots=True)
@@ -380,6 +384,8 @@ def children(n: Node) -> list[Node]:
             return [o, *items]
         case OnValue(params=ps):
             return [v for _, v in ps]
+        case InTimeRange(start=a, end=b):
+            return [x for x in (a, b) if isinstance(x, Node)]
         case Cascade(arms=arms) | Latest(arms=arms):
             out: list[Node] = []
             for a in arms:

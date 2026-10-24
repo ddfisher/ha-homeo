@@ -35,9 +35,9 @@ def _num(v: Any) -> float | None:
 @dataclass(frozen=True)
 class OnParam:
     name: str  # name in homeo: brightness
-    type: T  # PERCENT or NUMBER
+    type: T  # PERCENT, NUMBER or DURATION
     service_key: str  # brightness_pct
-    read_attr: str  # brightness
+    read_attr: str | None  # brightness; None: write-only (`transition`), never compared
     to_service: Any  # value -> service data value
     to_read: Any  # value -> expected attribute value
     tolerance: Any  # state -> tolerance
@@ -62,6 +62,10 @@ class Writer:
 
     def matches(self, state: EntityState | None, value: Any) -> bool:
         raise NotImplementedError
+
+    def transition(self, value: Any) -> float:
+        """How long the device takes to reach `value` after a write, in seconds."""
+        return 0.0
 
     def view(self, state: EntityState | None) -> tuple:
         if state is None:
@@ -113,7 +117,7 @@ class OnOffWriter(Writer):
 
     @property
     def read_attrs(self) -> frozenset[str | None]:
-        return frozenset({None, *(p.read_attr for p in self.on_params.values())})
+        return frozenset({None, *(p.read_attr for p in self.on_params.values() if p.read_attr)})
 
     def matches(self, state: EntityState | None, value: Any) -> bool:
         if state is None:
@@ -124,6 +128,8 @@ class OnOffWriter(Writer):
         if isinstance(value, OnSpec):
             for name, v in value.params:
                 p = self.on_params[name]
+                if p.read_attr is None:
+                    continue  # write-only: how to get there, not where to be
                 actual = _num(state.attributes.get(p.read_attr))
                 if actual is None or abs(actual - p.to_read(v)) > p.tolerance(state):
                     return False
@@ -133,8 +139,15 @@ class OnOffWriter(Writer):
         if state is None:
             return (None,)
         return (state.state,) + tuple(
-            state.attributes.get(p.read_attr) for p in self.on_params.values()
+            state.attributes.get(p.read_attr) for p in self.on_params.values() if p.read_attr
         )
+
+    def transition(self, value: Any) -> float:
+        """How long the device takes to reach `value` (`on(..., transition: 5min)`), in s."""
+        if isinstance(value, OnSpec) and "transition" in self.on_params:
+            t = _num(value.get("transition"))
+            return max(0.0, t) if t is not None else 0.0
+        return 0.0
 
 
 LIGHT_PARAMS = {
@@ -155,6 +168,16 @@ LIGHT_PARAMS = {
         lambda v: int(round(_num(v))),
         lambda v: _num(v),
         lambda s: 0.02 * (_num(s.attributes.get("color_temp_kelvin")) or 3000),
+    ),
+    # How long the light takes to get there (I25). Sent with the call, never read back.
+    "transition": OnParam(
+        "transition",
+        T.DURATION,
+        "transition",
+        None,
+        lambda v: _clean(round(_num(v), 3)),
+        lambda v: _num(v),
+        lambda s: 0,
     ),
 }
 

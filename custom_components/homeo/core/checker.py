@@ -130,6 +130,15 @@ def infer_entity_type(entity_id: str, state: EntityState | None) -> T:
         return T.TIMESTAMP
     if domain in NUMBER_DOMAINS:
         return T.NUMBER
+    if domain == "time":
+        return T.TIMEOFDAY
+    if (
+        domain == "input_datetime"
+        and state is not None
+        and state.attributes.get("has_time")
+        and not state.attributes.get("has_date")
+    ):
+        return T.TIMEOFDAY  # a time-only helper (I24)
     if (
         (domain == "group" or domain not in KNOWN_DOMAINS)
         and state is not None
@@ -389,9 +398,9 @@ class Checker:
         )
         return ir.Read(t, span, text, False, cell)
 
-    def sun_cell(self, span: Span, *times: DailyTime) -> ir.CellDef | None:
+    def sun_cell(self, span: Span, *times: DailyTime | ir.Node) -> ir.CellDef | None:
         """The `sun.sun` cell, if any of `times` is solar (D4: solar times come from it)."""
-        solar = [t.solar for t in times if t.solar is not None]
+        solar = [t.solar for t in times if isinstance(t, DailyTime) and t.solar is not None]
         if not solar:
             return None
         if not self.catalog.entity_exists(SUN_ENTITY):
@@ -644,17 +653,19 @@ class Checker:
         return self.cell(ir.ExprCell(f"expr:{n.text}", n.type, n.text, n.span, expr=n))
 
     def occurrence_cell(self, e: A.Expr, ctx: _Ctx, what: str) -> ir.CellDef:
-        """A bool or timestamp signal used as an occurrence (§3); bare times become time points."""
+        """A bool or timestamp signal used as an occurrence (§3); times of day (written, or
+        from a time-of-day entity, I24) become time points."""
         n = self.resolve(e, ctx)
-        if isinstance(n, ir.Const) and n.type == T.TIMEOFDAY:
+        if n.type == T.TIMEOFDAY:
+            bound = self.time_bound(n)
             return self.cell(
                 ir.TimePointCell(
                     f"timepoint:{n.text}",
                     T.TIMESTAMP,
                     n.text,
                     n.span,
-                    daily=n.value,
-                    sun=self.sun_cell(n.span, n.value),
+                    daily=bound,
+                    sun=self.sun_cell(n.span, bound),
                 )
             )
         if n.type not in (T.BOOL, T.TIMESTAMP, T.ANY):
@@ -663,16 +674,36 @@ class Checker:
             )
         return self.history_cell(n, what)
 
+    @staticmethod
+    def time_bound(n: ir.Node) -> DailyTime | ir.Node:
+        """A time of day: fixed (a DailyTime), or a node giving one at run time (I24)."""
+        return n.value if isinstance(n, ir.Const) else n
+
     def arith(self, op: str, a: ir.Node, b: ir.Node, span: Span) -> ir.Node:
         ta, tb = a.type, b.type
         num = lambda t: t in NUMERIC or t == T.ANY  # noqa: E731
         result: T | None = None
         if ta == T.TIMEOFDAY and op in "+-" and tb == T.DURATION:
-            if isinstance(a, ir.Const) and isinstance(b, ir.Const):
+            if not isinstance(b, ir.Const):
+                self.fail("a time of day can only be shifted by a fixed duration", span)
+            if isinstance(a, ir.Const):
                 delta = b.value.lo if op == "+" else -b.value.lo
                 text = f"{a.text} {op} {b.text}"
                 return ir.Const(T.TIMEOFDAY, span, text, False, a.value.shifted(delta))
-            self.fail("a time of day can only be shifted by a fixed duration", span)
+            text = f"{self.paren_arith(a)} {op} {self.paren_arith(b)}"
+            return ir.Arith(T.TIMEOFDAY, span, text, False, op, a, b)  # e.g. a helper + 30min
+        if op == "-" and tb == T.TIMEOFDAY and ta in (T.TIMESTAMP, T.TIMEOFDAY):
+            # I24: timestamp − time of day = how long since it last happened;
+            # time of day − time of day = how long from the second to the first (wall clock).
+            for n in (a, b):
+                if isinstance(n, ir.Const) and n.type == T.TIMEOFDAY and n.value.solar:
+                    self.fail(
+                        f"`{n.text}` moves from day to day, so it can't be subtracted",
+                        n.span,
+                        f"use `age({n.text})` for the time since it last happened",
+                    )
+            text = f"{self.paren_arith(a)} - {self.paren_arith(b)}"
+            return ir.Arith(T.DURATION, span, text, a.moving, op, a, b)
         if num(ta) and num(tb):
             if ta == T.PERCENT and (tb == T.PERCENT or op in "*/"):
                 result = T.PERCENT
@@ -727,18 +758,17 @@ class Checker:
             if isinstance(b, ir.Now):
                 a, b = b, a
                 op = {"<": ">", ">": "<", "<=": ">=", ">=": "<="}.get(op, op)
-            if not isinstance(b, ir.Const):
-                self.fail("compare `now` with a fixed time of day", span)
-            if op in (">", ">=") and b.value == MIDNIGHT:
+            bound = self.time_bound(b)
+            if op in (">", ">=") and bound == MIDNIGHT:
                 # every time of day is at or after midnight (the range 00:00..00:00 is empty)
                 return ir.Const(T.BOOL, span, text, False, True)
             if op in (">", ">="):
                 return ir.InTimeRange(
-                    T.BOOL, span, text, False, b.value, MIDNIGHT, sun=self.sun_cell(span, b.value)
+                    T.BOOL, span, text, False, bound, MIDNIGHT, sun=self.sun_cell(span, bound)
                 )
             if op in ("<", "<="):
                 return ir.InTimeRange(
-                    T.BOOL, span, text, False, MIDNIGHT, b.value, sun=self.sun_cell(span, b.value)
+                    T.BOOL, span, text, False, MIDNIGHT, bound, sun=self.sun_cell(span, bound)
                 )
             self.fail(
                 f"`now {op} {b.text}` is never exactly true",
@@ -840,12 +870,15 @@ class Checker:
             text = f"{x.text} {text_op} {lo.text}..{hi.text}"
             if isinstance(x, ir.Now):
                 for b in (lo, hi):
-                    if not (isinstance(b, ir.Const) and b.type == T.TIMEOFDAY):
-                        self.fail("a time range needs times of day, e.g. `22:00..06:00`", b.span)
-                sun = self.sun_cell(span, lo.value, hi.value)
-                return ir.InTimeRange(
-                    T.BOOL, span, text, False, lo.value, hi.value, negate, sun=sun
-                )
+                    if b.type != T.TIMEOFDAY:
+                        self.fail(
+                            "a time range needs times of day, e.g. `22:00..06:00`",
+                            b.span,
+                            "or a time-only `input_datetime` helper or `time` entity",
+                        )
+                start, end = self.time_bound(lo), self.time_bound(hi)
+                sun = self.sun_cell(span, start, end)
+                return ir.InTimeRange(T.BOOL, span, text, False, start, end, negate, sun=sun)
             if isinstance(x, ir.Today):
                 for b in (lo, hi):
                     if not (isinstance(b, ir.Const) and b.type == T.DAY and len(b.value.days) == 1):
@@ -921,7 +954,7 @@ class Checker:
             self.nargs(e, name, 1)
             arg = e.args[0]
             n = self.resolve(arg, ctx)
-            if isinstance(n, ir.Const) and n.type == T.TIMEOFDAY:
+            if n.type == T.TIMEOFDAY:
                 cell = self.occurrence_cell(arg, ctx, "`age`")
             else:
                 cell = self.history_cell(n, "`age`")
@@ -1256,6 +1289,8 @@ class Checker:
                         self.fail(f"`{name}` takes a percentage, e.g. `{name}: 50%`", leaf.span)
                     if p.type == T.NUMBER and leaf.type not in NUMERIC:
                         self.fail(f"`{name}` takes a number", leaf.span)
+                    if p.type == T.DURATION and leaf.type != T.DURATION:
+                        self.fail(f"`{name}` takes a duration, e.g. `{name}: 5min`", leaf.span)
         if isinstance(r, ir.Const) and r.type == T.STRING:
             allowed = writer.literal_values
             if allowed is None and writer.domain in ("input_select", "select"):
