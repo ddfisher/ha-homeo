@@ -116,6 +116,24 @@ try {
   await shot("panel-complete");
   await page.keyboard.press("Escape");
 
+  // services in action bodies, and `on(...)` settings as soon as `(` is typed (issue #9);
+  // undone afterwards, so the steps below see the same text
+  const beforeServices = await editorText();
+  await page.keyboard.type("\non input_button.boost: switch.ac.tog");
+  await panel.locator(".cm-tooltip-autocomplete li", { hasText: "toggle" }).first().waitFor({ timeout: 5000 });
+  options = await panel.locator(".cm-tooltip-autocomplete li").allTextContents();
+  check("entity service completion", options.some((o) => o.includes("toggle")), options.join());
+  await page.keyboard.press("Escape");
+  await page.keyboard.type("\nlight.kitchen_lights := on(");
+  await panel.locator(".cm-tooltip-autocomplete li", { hasText: "brightness" }).first().waitFor({ timeout: 5000 });
+  options = await panel.locator(".cm-tooltip-autocomplete li").allTextContents();
+  check("on() settings", options.some((o) => o.includes("kelvin")) && !options.some((o) => o.includes("percentage")), options.join());
+  await page.keyboard.press("Escape");
+  for (let i = 0; i < 40 && (await editorText()) !== beforeServices; i++) {
+    await page.keyboard.press("Control+z");
+  }
+  check("completion edits undone", (await editorText()) === beforeServices);
+
   // Explain the fan's rule (the running version), then follow the cursor
   await panel.locator(".cm-line", { hasText: "fan.ceiling_fan :=" }).click();
   await panel.locator("button.explain").click();
