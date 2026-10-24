@@ -387,7 +387,9 @@ class Runtime:
             return maybe_before(self.now)
         if st.attributes.get("event_type") == d.event_type:
             return Num.of(t)
-        return maybe_before(t)
+        # The entity's last event, at t, was of another type, so this one last happened (if
+        # ever) strictly before t: a `latest` over both types picks the one at t.
+        return maybe_before(math.nextafter(t, -INF))
 
     def _compute(self, rc: RCell) -> Any:
         d = rc.defn

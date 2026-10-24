@@ -1152,7 +1152,17 @@ class Checker:
             value, (ir.Cascade, ir.Latest)
         ):
             last = value.arms[-1] if value.arms else None
-            if not (isinstance(last, ir.ArmIR) and last.cond is None):
+            if isinstance(last, ir.ArmIR) and last.cond is None:
+                pass
+            elif isinstance(value, ir.Latest):
+                # Until one of the conditions has happened, leave the device alone.
+                keep = ir.Const(T.KEEP, stmt.value.span, "keep", False, KEEP)
+                value.arms.append(
+                    ir.ArmIR(
+                        None, keep, stmt.value.span, "else -> keep", "else -> keep", implicit=True
+                    )
+                )
+            else:
                 self.error(
                     "a binding's arms must end with `else -> …`",
                     stmt.value.span,

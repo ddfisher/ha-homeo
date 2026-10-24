@@ -481,7 +481,7 @@ Each of these is a **timestamp signal**: its value is the time it last happened.
 | Source | Syntax | Notes |
 |---|---|---|
 | Event entity (HA 2023.8+: remotes, doorbells, buttons) | `event.hall_remote` | HA's own state. Its attributes (`event_type`, …) describe the last event. |
-| One event type | `event.hall_remote.double_press` (D8) | Time of the last event of that type, tracked by the runtime. After a restart, only the latest event's type is known (from HA's state); other types count as "before the restart" (§17). |
+| One event type | `event.hall_remote.double_press` (D8) | Time of the last event of that type, tracked by the runtime. After a restart, only the latest event's type is known (from HA's state); other types count as "some time before that event" (§17), so a `latest` over several types of one entity still picks the latest event. |
 | Button helpers / button entities | `input_button.boost`, `button.x` | HA's own state: time of the last press |
 | Manual control | `manual(fan.bathroom)` | Time of the last change not made by homeo (§15) |
 | Time points | `07:00`, `sunset - 30min` | Time of the most recent occurrence (§12) |
@@ -546,9 +546,11 @@ let blinds_mode = latest
 
 - **Arms use the same syntax as cascades** (`cond -> result`, with `|` sub-arms). Results can be
   any expression.
-- **`else`** is used when none of the conditions has ever happened. It's required in bindings,
-  as with cascades, and is usually `keep` ("no opinion yet"). In a `let`, it may be left out; the
-  value is then `unknown` until one of the conditions has happened (D16).
+- **`else`** is used when none of the conditions has ever happened. In a binding it may be left
+  out, and is then `else -> keep` ("no opinion yet"; unlike cascades, which need one). In a
+  `let`, leaving it out makes the value `unknown` until one of the conditions has happened
+  (D16): `keep` isn't a value outside bindings, and `unknown` leaves a device alone just the
+  same if the `let` is bound.
 - **Conditions must be bools or timestamps.** Anything else is a type error.
 - **Ties** (same occurrence time): the first arm wins.
 
@@ -1116,7 +1118,7 @@ on humidity > 90% for 30min:
 | D16 | Unknown handling | **Decided** | Kleene logic; unknown → keep; change times skip dropouts; a binding writes when its known result changes (device state stands in when there's no previous result, e.g. after a restart or `keep`) |
 | D17 | Restarts & reloads | **Decided** | no storage of our own in v1; pre-restart change times are lower bounds; devices synced to definite results at boot; reloads keep bindings', actions' and machines' state |
 | D18 | Abstraction | **Decided: v2** | compile-time templates |
-| D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `cond -> value` arms |
+| D19 | Most-recent-wins | **Decided** (name tentative) | `latest` block with `cond -> value` arms; in a binding, a missing `else` means `else -> keep` |
 | D20 | "Since entering this state" | **Decided** | `fresh(x)`, only inside `state` blocks |
 | D21 | Manual-change detection | **Decided** | HA `Context` + differs from last write + not (un)availability; other automations count |
 | D22 | Declarative notifications | **Decided: not in v1** | maybe later: `notify.x := <message or none>` using tags/clear |

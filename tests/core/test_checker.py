@@ -4,6 +4,7 @@ from custom_components.homeo.core import ir
 from custom_components.homeo.core.checker import Globals, compile_source
 from custom_components.homeo.core.errors import CompileError
 from custom_components.homeo.core.types import T
+from custom_components.homeo.core.values import KEEP
 
 from .fakehost import standard_world
 
@@ -335,11 +336,12 @@ def test_missing_else(host):
     assert "must end with `else" in d.message
 
 
-def test_latest_in_binding_needs_else(host):
-    assert (
-        "must end with `else"
-        in err(host, "light.desk := latest\n    input_button.desk_on -> on\n").message
-    )
+def test_latest_in_binding_without_else_keeps(host):
+    """Issue #10: until one of the conditions has happened, leave the device alone."""
+    p = ok(host, "light.desk := latest\n    input_button.desk_on -> on\n")
+    last = p.bindings[0].expr.arms[-1]
+    assert last.cond is None and last.result.value is KEEP
+    assert last.implicit
 
 
 def test_latest_in_let_may_omit_else(host):
