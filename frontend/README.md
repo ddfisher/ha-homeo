@@ -1,7 +1,8 @@
 # Homeo editor panel
 
 The source of the Homeo sidebar panel (design §19): a CodeMirror 6 editor for `.homeo` files
-with syntax highlighting, inline errors, entity autocompletion, save and "Explain".
+with syntax highlighting, inline errors, autocompletion (entities, attributes, event types, services
+and their fields in `on` actions, `on(...)` settings), save and "Explain".
 
 HACS only ships `custom_components/homeo/`, so the panel is bundled into one module,
 `custom_components/homeo/frontend/homeo-panel.js`, which is committed. After changing anything

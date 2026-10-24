@@ -388,8 +388,10 @@ adding entities.
 **I22. Editor panel** (§19). A sidebar panel "Homeo" for admins, registered when the frontend
 is loaded. The editor is CodeMirror 6 (what HA's own code editor uses) with a stream-parser
 highlighter mirroring the lexer, coloured with HA's code editor theme variables (so themes and
-dark mode apply), entity-id completion from the live states, and Ctrl/Cmd+S to save. HACS only
-ships `custom_components/homeo/`, so `frontend/` (source, tests, README) is bundled with esbuild
+dark mode apply), completion from the live states and services (entity ids, attributes and
+event types, `let` aliases of entities; in `on` action bodies, services with their data fields,
+e.g. `switch.pump.toggle()`; `on(...)` settings for the bound domain), and Ctrl/Cmd+S to save.
+HACS only ships `custom_components/homeo/`, so `frontend/` (source, tests, README) is bundled with esbuild
 into one committed module, `custom_components/homeo/frontend/homeo-panel.js` (~400 KB, 130 KB
 gzipped, nearly all CodeMirror); CI checks it matches the source. It talks to the integration
 over admin-only websocket commands (`websocket.py`): `homeo/files`, `homeo/file/read`,
