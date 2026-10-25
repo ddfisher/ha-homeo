@@ -326,6 +326,35 @@ async def test_calls_to_one_entity_run_in_order(hass: HomeAssistant, setup_homeo
     ]
 
 
+async def test_a_slow_call_doesnt_hold_up_later_ones(hass: HomeAssistant, setup_homeo):
+    """Only a jump and its transition wait for each other; other calls stay independent."""
+    hass.states.async_set("input_boolean.x", "off")
+    hass.states.async_set("switch.pump", "off")
+    log = []
+    gate = asyncio.Event()
+
+    async def turn_on(call):
+        log.append("on start")
+        await gate.wait()  # a device that doesn't answer
+        log.append("on end")
+
+    async def turn_off(call):
+        log.append("off")
+
+    hass.services.async_register("switch", "turn_on", turn_on)
+    hass.services.async_register("switch", "turn_off", turn_off)
+    await setup_homeo({"t.homeo": "switch.pump := input_boolean.x\n"})
+    hass.states.async_set("input_boolean.x", "on")
+    for _ in range(20):
+        await asyncio.sleep(0)
+    hass.states.async_set("input_boolean.x", "off")
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert log == ["on start", "off"]
+    gate.set()
+    await hass.async_block_till_done()
+
+
 async def test_config_flow_single_instance(hass: HomeAssistant):
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
     assert result["type"] == "form"

@@ -96,6 +96,10 @@ class FakeHost:
 
         return cancel
 
+    def call_services(self, calls: list[ServiceCall]) -> None:
+        for call in calls:
+            self.call_service(call)
+
     def call_service(self, call: ServiceCall) -> None:
         self.calls.append(call)
         self.call_times.append(self.t)

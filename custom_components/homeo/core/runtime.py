@@ -1069,11 +1069,15 @@ class Runtime:
         if not s.dry_run:
             s.last_written = written  # what manual-change detection compares with (D21)
         source = f"{b.file}:{b.span.line}"
+        calls = [
+            ServiceCall(c.domain, c.service, c.data, c.entity_id, source, b.key) for c in calls
+        ]
         for call in calls:
-            call = ServiceCall(call.domain, call.service, call.data, call.entity_id, source, b.key)
-            self._call(call, s.dry_run)
+            self._call(call, s.dry_run, send=len(calls) == 1)
+        if len(calls) > 1 and not s.dry_run:
+            self.host.call_services(calls)  # in order: a jump lands before its transition
 
-    def _call(self, call: ServiceCall, dry_run: bool) -> None:
+    def _call(self, call: ServiceCall, dry_run: bool, send: bool = True) -> None:
         desc = f"{call.domain}.{call.service}"
         if call.entity_id:
             desc += f" on {call.entity_id}"
@@ -1083,7 +1087,8 @@ class Runtime:
             self.host.log("info", f"[dry run] {call.source}: would call {desc}")
             return
         self.host.log("debug", f"{call.source}: calling {desc}")
-        self.host.call_service(call)
+        if send:
+            self.host.call_service(call)
 
     def _run_action(self, s: RSink, a: ir.ActionDef) -> None:
         occ = self.cells[a.trigger.key].occurrence()

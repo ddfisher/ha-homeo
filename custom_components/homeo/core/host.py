@@ -85,6 +85,11 @@ class Host(EntityCatalog, Protocol):
 
     def call_service(self, call: ServiceCall) -> None: ...
 
+    def call_services(self, calls: list[ServiceCall]) -> None:
+        """Make the calls one after another, each once the one before has finished (a jump to a
+        behavior's current value, then its transition, D23). Other calls stay independent."""
+        ...
+
     def publish_machine(self, name: str, value: str, changed_at: float, options: list[str]) -> None:
         """Update (or create) the machine's `select` entity."""
         ...

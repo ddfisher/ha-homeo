@@ -192,7 +192,7 @@ rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts ar
 | I21 | `homeo.explain` | A service with a response; target = binding target, entity, machine or `let` name; per arm: condition value, subexpression values (sugar expanded, `let` names kept), active arm; plus summary, device state, last write |
 | I22 | Editor panel | CodeMirror 6, bundled into one committed module (HACS ships only `custom_components/homeo/`); admin-only websocket API (`homeo/files`, `files/subscribe`, `file/read`, `file/check`, `file/save`, `file/delete`, `explain`); errors checked as you type against the other running files; save reloads at once; Explain follows the cursor; unsaved edits kept across pages; saves refuse to overwrite edits made elsewhere |
 | I23 | Future timestamps | `t(x)` is the most recent value at or before now; a future value happens when its time comes. Before one has been seen to pass, the last occurrence is "some time before now" (as for pre-restart times), so `age(x)` is a lower bound. A value replaced once its time has come (or at most 1 s before, for clock skew) happened |
-| I24 | Behaviors (D23) | Results compared as lines (value and rate at the same instant); pieces end at the binding's next wake-up, ≤ 300 s with `transition:` for lights with the transition feature, else one resolution step (≥ 5 s); `last_written` covers the previous and current pieces; a manual change clears the following; non-exact behaviors are `unknown`; calls to one entity run in order |
+| I24 | Behaviors (D23) | Results compared as lines (value and rate at the same instant); pieces end at the binding's next wake-up, ≤ 300 s with `transition:` for lights with the transition feature, else one resolution step (≥ 5 s); `last_written` covers the previous and current pieces; a manual change clears the following; non-exact behaviors are `unknown`; a jump and its transition are sent in order, other calls stay independent |
 
 ### Repository state
 
@@ -472,7 +472,8 @@ Each piece is a straight line that ends at the next instant the expression may c
 speeds, positions and volume, and the entity's own limits for kelvin (`min/max_color_temp_kelvin`),
 setpoints (`min_temp`/`max_temp`) and numbers (`min`/`max`). A clamped behavior is constant until
 it comes back into range, so a ramp written without a floor stops at 0% instead of sending
-values the device would reject.
+values the device would reject. Fixed results are clamped the same way: `input_number.x := 500`
+on a helper with `max: 100` sends 100, where before D23 it sent 500, which HA rejects.
 
 **Change detection and manual changes (D15, D16, D21).** A behavior's value is the whole line,
 not its reading at one instant. Following it is *one* write that plays out over time:

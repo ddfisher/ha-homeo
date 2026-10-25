@@ -392,3 +392,17 @@ def test_steps_are_written_at_least_once_a_day():
     rule = "input_number.target := 5 + (age(19:00) / 1h) * 0.000000000001"
     r = Rig(rule, host=world())
     assert max(r.h.pending_timers()) <= r.h.t + 86400
+
+
+def test_fixed_values_are_clamped_too():
+    h = world(
+        **{
+            "input_number.target": ("50", {"min": 0, "max": 100, "step": 1}),
+            "climate.living": ("heat", {"temperature": 20, "min_temp": 7, "max_temp": 25}),
+        }
+    )
+    r = Rig("input_number.target := 500\nclimate.living.temperature := 30\n", host=h)
+    assert sorted(r.new_calls()) == [
+        "climate.set_temperature climate.living temperature=25",
+        "input_number.set_value input_number.target value=100",
+    ]
