@@ -47,6 +47,7 @@ class HassHost:
         self.tz = dt_util.get_default_time_zone()
         self._our_ids: deque[str] = deque(maxlen=_OUR_CONTEXTS)
         self._our_set: set[str] = set()
+        self._issued: dict[str, int] = {}  # calls issued so far, per entity
 
     # ------------------------------------------------------------- catalog
 
@@ -125,9 +126,13 @@ class HassHost:
 
     def call_services(self, calls: list[ServiceCall]) -> None:
         prepared = [(call, *self._prepare(call)) for call in calls]
+        entity = calls[0].entity_id if calls else None
+        mine = self._issued.get(entity, 0) if entity else 0
 
         async def run() -> None:
-            for call, target, ctx in prepared:
+            for i, (call, target, ctx) in enumerate(prepared):
+                if i and entity and self._issued.get(entity, 0) != mine:
+                    return  # superseded: a newer call to this entity went out meanwhile
                 await self._call(call, target, ctx)
 
         self.hass.async_create_task(run(), f"homeo {len(calls)} calls")
@@ -136,6 +141,8 @@ class HassHost:
         """Our context for a call (remembered for manual-change detection, D21), announced
         with the rule that caused it."""
         ctx = Context()
+        if call.entity_id:
+            self._issued[call.entity_id] = self._issued.get(call.entity_id, 0) + 1
         if len(self._our_ids) == self._our_ids.maxlen:
             self._our_set.discard(self._our_ids[0])
         self._our_ids.append(ctx.id)

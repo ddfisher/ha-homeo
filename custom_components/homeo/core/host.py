@@ -87,7 +87,8 @@ class Host(EntityCatalog, Protocol):
 
     def call_services(self, calls: list[ServiceCall]) -> None:
         """Make the calls one after another, each once the one before has finished (a jump to a
-        behavior's current value, then its transition, D23). Other calls stay independent."""
+        behavior's current value, then its transition, D23). Other calls stay independent; a
+        later call of the group is dropped if a newer call to its entity was made meanwhile."""
         ...
 
     def publish_machine(self, name: str, value: str, changed_at: float, options: list[str]) -> None:

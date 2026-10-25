@@ -389,6 +389,9 @@ advanced to now (`values.advance`) and compared value and rate, up to float roun
 - **Order:** a jump and its transition go to the host together (`Host.call_services`), which
   runs them one after the other in one task, so the jump lands first. Every other call is
   independent, as before: a slow or stuck call doesn't hold up later writes to the entity.
+  `HassHost` counts the calls issued to each entity, and drops the transition if a newer call
+  to that entity was issued while it waited (it would otherwise land after that call, e.g. an
+  `off`, and undo it).
 - `homeo.explain` shows a moving value with its rate ("76%, falling 24%/h") and a `following`
   line; `device_matches` accepts anything along the current piece.
 
