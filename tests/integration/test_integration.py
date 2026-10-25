@@ -265,6 +265,135 @@ async def test_time_points_fire(hass: HomeAssistant, setup_homeo, freezer):
     assert len(calls) == 1 and calls[0].data == {"message": "morning"}
 
 
+async def test_behavior_follows_with_transitions(hass: HomeAssistant, setup_homeo, freezer):
+    """D23: a ramp is sent as pieces with `transition:`, at most 5 minutes each."""
+    await hass.config.async_set_time_zone("UTC")
+    freezer.move_to("2026-01-05 18:59:00+00:00")
+    hass.states.async_set("light.hall", "on", {"brightness": 255, "supported_features": 32})
+    calls = async_mock_service(hass, "light", "turn_on")
+    rule = (
+        "light.hall :=\n"
+        "    now in 19:00..23:00 -> on(brightness: 100% - 96% * (age(19:00) / 4h))\n"
+        "    else -> keep\n"
+    )
+    await setup_homeo({"t.homeo": rule})
+    assert calls == []
+    for minute, pct in ((0, 98), (5, 96), (10, 94)):
+        freezer.move_to(f"2026-01-05 19:{minute:02d}:00+00:00")
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+        assert calls[-1].data == {
+            "entity_id": "light.hall",
+            "brightness_pct": pct,
+            "transition": 300,
+        }
+    assert len(calls) == 3
+
+
+async def test_calls_to_one_entity_run_in_order(hass: HomeAssistant, setup_homeo, freezer):
+    """A jump to a behavior's current value finishes before its transition starts (D23)."""
+    await hass.config.async_set_time_zone("UTC")
+    freezer.move_to("2026-01-05 18:59:00+00:00")
+    hass.states.async_set("light.hall", "off", {"supported_features": 32})
+    log = []
+    gate = asyncio.Event()
+
+    async def turn_on(call):
+        log.append(("start", dict(call.data)))
+        if "transition" not in call.data:
+            await gate.wait()  # a slow device
+        log.append(("end", dict(call.data)))
+
+    hass.services.async_register("light", "turn_on", turn_on)
+    rule = (
+        "light.hall :=\n"
+        "    now in 19:00..23:00 -> on(brightness: 100% - 96% * (age(19:00) / 4h))\n"
+        "    else -> keep\n"
+    )
+    await setup_homeo({"t.homeo": rule})
+    freezer.move_to("2026-01-05 19:00:00+00:00")
+    async_fire_time_changed(hass)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert [(k, d.get("brightness_pct")) for k, d in log] == [("start", 100)]
+    gate.set()
+    await hass.async_block_till_done()
+    assert [(k, d.get("brightness_pct")) for k, d in log] == [
+        ("start", 100),
+        ("end", 100),
+        ("start", 98),
+        ("end", 98),
+    ]
+
+
+async def test_a_slow_call_doesnt_hold_up_later_ones(hass: HomeAssistant, setup_homeo):
+    """Only a jump and its transition wait for each other; other calls stay independent."""
+    hass.states.async_set("input_boolean.x", "off")
+    hass.states.async_set("switch.pump", "off")
+    log = []
+    gate = asyncio.Event()
+
+    async def turn_on(call):
+        log.append("on start")
+        await gate.wait()  # a device that doesn't answer
+        log.append("on end")
+
+    async def turn_off(call):
+        log.append("off")
+
+    hass.services.async_register("switch", "turn_on", turn_on)
+    hass.services.async_register("switch", "turn_off", turn_off)
+    await setup_homeo({"t.homeo": "switch.pump := input_boolean.x\n"})
+    hass.states.async_set("input_boolean.x", "on")
+    for _ in range(20):
+        await asyncio.sleep(0)
+    hass.states.async_set("input_boolean.x", "off")
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert log == ["on start", "off"]
+    gate.set()
+    await hass.async_block_till_done()
+
+
+async def test_superseded_transition_is_not_sent(hass: HomeAssistant, setup_homeo, freezer):
+    """A transition waiting behind a slow jump is dropped once a newer call has gone out, so it
+    can't undo that call (D23)."""
+    await hass.config.async_set_time_zone("UTC")
+    freezer.move_to("2026-01-05 18:59:00+00:00")
+    hass.states.async_set("light.hall", "off", {"supported_features": 32})
+    hass.states.async_set("input_boolean.x", "off")
+    log = []
+    gate = asyncio.Event()
+
+    async def turn_on(call):
+        log.append(("on", call.data.get("brightness_pct"), call.data.get("transition")))
+        if "transition" not in call.data:
+            await gate.wait()  # the device stalls on the jump
+
+    async def turn_off(call):
+        log.append(("off", None, None))
+
+    hass.services.async_register("light", "turn_on", turn_on)
+    hass.services.async_register("light", "turn_off", turn_off)
+    rule = (
+        "light.hall :=\n"
+        "    input_boolean.x -> off\n"
+        "    now in 19:00..23:00 -> on(brightness: 100% - 96% * (age(19:00) / 4h))\n"
+        "    else -> keep\n"
+    )
+    await setup_homeo({"t.homeo": rule})
+    freezer.move_to("2026-01-05 19:00:00+00:00")
+    async_fire_time_changed(hass)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    hass.states.async_set("input_boolean.x", "on")
+    for _ in range(20):
+        await asyncio.sleep(0)
+    gate.set()
+    await hass.async_block_till_done()
+    assert log == [("on", 100, None), ("off", None, None)]
+
+
 async def test_config_flow_single_instance(hass: HomeAssistant):
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
     assert result["type"] == "form"

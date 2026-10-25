@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 INF = math.inf
 
@@ -264,3 +265,77 @@ def same_value(a, b) -> bool:
     if type(a) is not type(b):
         return False
     return a == b
+
+
+# --------------------------------------------------------------- behaviors (D23)
+#
+# A binding result may contain numbers that move with the clock (a behavior). These helpers
+# work on whole results: a `Num`, or an `OnSpec` whose settings are `Num`s.
+
+
+def _map_nums(v: Any, f) -> Any:
+    if isinstance(v, Num):
+        return f(v)
+    if isinstance(v, OnSpec):
+        return OnSpec(tuple((k, _map_nums(x, f)) for k, x in v.params))
+    return v
+
+
+def _nums(v: Any) -> list[Num]:
+    if isinstance(v, Num):
+        return [v]
+    if isinstance(v, OnSpec):
+        return [x for _, x in v.params if isinstance(x, Num)]
+    return []
+
+
+def is_moving(v: Any) -> bool:
+    return any(n.moving for n in _nums(v))
+
+
+def is_definite(v: Any) -> bool:
+    """Every number in the result is known exactly (not only as a range) and finite."""
+    return all(
+        n.lo == n.hi and n.rlo == n.rhi and math.isfinite(n.lo) and math.isfinite(n.rlo)
+        for n in _nums(v)
+    )
+
+
+def advance(v: Any, dt: float) -> Any:
+    """The result `dt` seconds later."""
+    return _map_nums(v, lambda n: n.at(dt))
+
+
+def snapshot(v: Any) -> Any:
+    """The result's value at this instant, with nothing moving."""
+    return _map_nums(v, lambda n: Num(n.lo, n.hi))
+
+
+def hull(a: Any, b: Any) -> Any:
+    """Every value between two snapshots of one result (settings pairwise), as ranges."""
+    if isinstance(a, Num) and isinstance(b, Num):
+        return Num(min(a.lo, b.lo), max(a.hi, b.hi))
+    if isinstance(a, OnSpec) and isinstance(b, OnSpec):
+        other = dict(b.params)
+        if set(other) != {k for k, _ in a.params}:
+            return b
+        return OnSpec(tuple((k, hull(x, other[k])) for k, x in a.params))
+    return b
+
+
+def _close(x: float, y: float) -> bool:
+    return x == y or math.isclose(x, y, rel_tol=1e-9, abs_tol=1e-6)
+
+
+def same_line(a: Any, b: Any) -> bool:
+    """Whether two results (taken at the same instant) are the same behavior: equal values
+    and equal rates, up to float rounding."""
+    if isinstance(a, Num) and isinstance(b, Num):
+        return all(
+            _close(x, y) for x, y in ((a.lo, b.lo), (a.hi, b.hi), (a.rlo, b.rlo), (a.rhi, b.rhi))
+        )
+    if isinstance(a, OnSpec) and isinstance(b, OnSpec):
+        if [k for k, _ in a.params] != [k for k, _ in b.params]:
+            return False
+        return all(same_line(x, y) for (_, x), (_, y) in zip(a.params, b.params, strict=True))
+    return same_value(a, b)

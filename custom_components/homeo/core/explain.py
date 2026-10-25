@@ -17,10 +17,10 @@ from typing import Any
 from . import ir
 from .errors import did_you_mean
 from .printer import fmt_duration
-from .runtime import NOTHING, RSink, Runtime, to_bool
+from .runtime import INF, NOTHING, RSink, Runtime, to_bool
 from .timeutil import last_occurrence
 from .types import T
-from .values import KEEP, UNKNOWN, DailyTime, Days, Num, OnSpec
+from .values import KEEP, UNKNOWN, DailyTime, Days, Num, OnSpec, is_moving, snapshot
 
 MACHINE_ENTITY_PREFIX = "select.homeo_"
 
@@ -90,7 +90,10 @@ class _Explainer:
     # ------------------------------------------------------------- statements
 
     def binding(self, s: RSink, b: ir.BindingDef) -> dict[str, Any]:
-        result = self.eval(b.expr)
+        try:
+            result = self.rt.binding_result(b, self.eval(b.expr))  # as the runtime writes it
+        except Exception:  # noqa: BLE001 - an explanation must not fail on one bad node
+            result = UNKNOWN
         state = self.rt.host.get_state(b.entity_id)
         out: dict[str, Any] = {
             "binding": b.key,
@@ -105,7 +108,12 @@ class _Explainer:
         out["summary"] = self.binding_summary(b, result, chosen)
         out["device"] = self.device(b, state)
         if result is not UNKNOWN and result is not KEEP:
-            out["device_matches"] = bool(b.writer.matches(state, result))
+            want = snapshot(result)
+            if is_moving(result) and s.piece_end < INF:
+                want = s.piece  # mid-transition, anywhere along the current piece (D23)
+            out["device_matches"] = bool(b.writer.matches(state, want))
+            if is_moving(result):
+                out["following"] = self.following(s)
         out["last_written"] = (
             "nothing yet" if s.last_written is NOTHING else self.fmt_result(s.last_written, b)
         )
@@ -113,6 +121,14 @@ class _Explainer:
             out["dry_run"] = True
         out.update(trace)
         return out
+
+    def following(self, s: RSink) -> str:
+        """What the binding is doing with a behavior (D23)."""
+        if s.piece_end < INF:
+            return f"following it; the current piece ends at {self.instant(s.piece_end)}"
+        if s.last_known is NOTHING:
+            return "not yet"
+        return "stopped by a manual change, until the result changes shape"
 
     def machine(self, m: Any) -> dict[str, Any]:
         d: ir.MachineCell = m.defn
@@ -388,11 +404,14 @@ class _Explainer:
                 return self.fmt_duration(v)
             if t == T.TIMESTAMP:
                 return self.fmt_time(v)
+            unit = "%" if t == T.PERCENT else ""
             if v.lo == v.hi and math.isfinite(v.lo):
                 x = round(v.lo, 6)
                 x = int(x) if x == int(x) else x
+                if v.rlo == v.rhi and v.rlo != 0:
+                    return f"{x:g}{unit}, {self.fmt_rate(v.rlo, unit)}"  # a behavior (D23)
                 return f"{x}%" if t == T.PERCENT else x
-            return f"between {v.lo:g} and {v.hi:g}"
+            return f"between {v.lo:g}{unit} and {v.hi:g}{unit}"
         if isinstance(v, str):
             return v
         return self.fmt_plain(v, t)
@@ -419,6 +438,16 @@ class _Explainer:
         if isinstance(v, tuple):
             return "[" + ", ".join(self.fmt_plain(x, T.ANY) for x in v) + "]"
         return str(v)
+
+    @staticmethod
+    def fmt_rate(rate: float, unit: str) -> str:
+        """How fast a behavior changes: "falling 1.4%/h"."""
+        word = "rising" if rate > 0 else "falling"
+        r = abs(rate)
+        for per, k in (("s", 1), ("min", 60), ("h", 3600)):
+            if r * k >= 1 or per == "h":
+                return f"{word} {r * k:.3g}{unit}/{per}"
+        raise AssertionError
 
     def fmt_duration(self, v: Num) -> str:
         lo, hi = v.lo, v.hi

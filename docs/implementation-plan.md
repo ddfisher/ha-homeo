@@ -352,6 +352,49 @@ person's change back to that old value. When dry run is turned off (directive re
 binding forgets its last result, so the device's state stands in and the device is brought in
 line once, as for a new binding (D16).
 
+**I24. Behaviors (D23).** A binding result may move with the clock where the writer can follow
+it (`Writer.follows`: every numeric target). The checker allows moving results in arms and in
+`on(...)`, and marks blocks and `on(...)` as moving when a result moves, so the existing checks
+(no `age`/`previous` of a moving value, no product of two moving values) still apply to them.
+`Runtime.binding_result` turns an evaluated result into what is written (explain uses it too):
+`unknown` if a number isn't exact (built on a change time from before a restart) or finite, and
+each number clamped to `Writer.bounds`, with wake-ups where the line reaches or leaves a bound.
+`??` treats a moving value that isn't exact as `unknown`.
+
+The runtime compares a moving result with the previous one as lines: the previous result is
+advanced to now (`values.advance`) and compared value and rate, up to float rounding
+(`values.same_line`). A binding that follows a behavior keeps the current piece's end
+(`piece_end`), its range (`piece`) and the value last sent (`piece_target`):
+
+- **Pieces** end at the binding's next wake-up or sooner. That is the earliest instant its
+  expression may change shape: the wake-ups registered while evaluating it (I1, and the clamp
+  bounds), and those of every cell it reads, transitively (`RSink.deps_all`), since a time point
+  or `every` tick resets an `age()` without the binding's own comparisons noticing. With transitions
+  (`Writer.supports_transition`: lights with feature 32), a piece is one `turn_on` to the value
+  at its end with `transition:` its length, at most `MAX_TRANSITION` (300 s), preceded by a call
+  setting the current value when the device doesn't match it (a jump). Without, a piece is one
+  step: the current value, lasting the time the behavior takes to move by the setting's
+  resolution (`Writer.step_time`), at least `MIN_STEP` (5 s) and at most a day. A first step
+  is skipped when the device already matches.
+- **A lapsed piece** (its end passed more than `PIECE_LAPSE`, 1 s, ago without a continuation,
+  because the result was `unknown`) starts the following again, with a jump if the device
+  doesn't match.
+- **When a ramp ends** (the result stops moving) exactly where the last piece's transition took
+  the device, nothing more is written.
+- **Manual changes:** `last_written` is the range of the previous and current pieces, so
+  in-between and late reports count as ours. A manual change (per binding) clears `piece_end`:
+  the line is still the last known result, so nothing is written until the result changes
+  shape. `keep` also clears it.
+- **Reloads** carry the piece state over; the reload's evaluation re-arms the wake-up.
+- **Order:** a jump and its transition go to the host together (`Host.call_services`), which
+  runs them one after the other in one task, so the jump lands first. Every other call is
+  independent, as before: a slow or stuck call doesn't hold up later writes to the entity.
+  `HassHost` counts the calls issued to each entity, and drops the transition if a newer call
+  to that entity was issued while it waited (it would otherwise land after that call, e.g. an
+  `off`, and undo it).
+- `homeo.explain` shows a moving value with its rate ("76%, falling 24%/h") and a `following`
+  line; `device_matches` accepts anything along the current piece.
+
 **I23. Timestamps in the future.** A timestamp signal's `t(x)` is its most recent value at or
 before now: a value in the future (a phone's next-alarm sensor, `sensor.next_alarm - 30min`)
 happens when its time comes, and the runtime wakes up then. `on sensor.next_alarm:` fires when
