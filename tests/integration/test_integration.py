@@ -265,6 +265,31 @@ async def test_time_points_fire(hass: HomeAssistant, setup_homeo, freezer):
     assert len(calls) == 1 and calls[0].data == {"message": "morning"}
 
 
+async def test_behavior_follows_with_transitions(hass: HomeAssistant, setup_homeo, freezer):
+    """D23: a ramp is sent as pieces with `transition:`, at most 5 minutes each."""
+    await hass.config.async_set_time_zone("UTC")
+    freezer.move_to("2026-01-05 18:59:00+00:00")
+    hass.states.async_set("light.hall", "on", {"brightness": 255, "supported_features": 32})
+    calls = async_mock_service(hass, "light", "turn_on")
+    rule = (
+        "light.hall :=\n"
+        "    now in 19:00..23:00 -> on(brightness: 100% - 96% * (age(19:00) / 4h))\n"
+        "    else -> keep\n"
+    )
+    await setup_homeo({"t.homeo": rule})
+    assert calls == []
+    for minute, pct in ((0, 98), (5, 96), (10, 94)):
+        freezer.move_to(f"2026-01-05 19:{minute:02d}:00+00:00")
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+        assert calls[-1].data == {
+            "entity_id": "light.hall",
+            "brightness_pct": pct,
+            "transition": 300,
+        }
+    assert len(calls) == 3
+
+
 async def test_config_flow_single_instance(hass: HomeAssistant):
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
     assert result["type"] == "form"

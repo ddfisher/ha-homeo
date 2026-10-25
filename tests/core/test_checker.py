@@ -171,9 +171,30 @@ let c = now in sunset - 30min..23:00
     assert "can't apply" in err(host, 'let x = sensor.lux + "a"').message
 
 
-def test_moving_value_cant_be_result(host):
-    d = err(host, "input_number.target := age(sensor.lux) / 1min")
-    assert "changes continuously" in d.message
+def test_behaviors_can_be_bound_to_numeric_targets(host):
+    """D23: a value that moves with the clock can be a binding result for numeric targets,
+    directly, in `on(...)` and in arms."""
+    ok(host, "input_number.target := age(sensor.lux) / 1min")
+    ok(
+        host,
+        """
+let level =
+    now in 19:00..23:00     -> 100% - 96% * (age(19:00) / 4h)
+    else                    -> 100%
+light.hall := on(brightness: level, kelvin: 2700 - age(19:00) / 1min)
+""",
+    )
+
+
+def test_behaviors_still_cant_be_tracked(host):
+    src = """
+let level =
+    now in 19:00..23:00     -> 100% - 96% * (age(19:00) / 4h)
+    else                    -> 100%
+"""
+    assert "changes continuously" in err(host, src + "let x = age(level) > 1h").message
+    assert "changes continuously" in err(host, src + "let x = previous(level)").message
+    assert "two values that both change" in err(host, src + "let x = level * level").message
 
 
 def test_age_of_moving_value_rejected(host):

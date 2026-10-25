@@ -161,6 +161,15 @@ Conversion facts:
 - Transitional states (`opening`, `closing`, `locking`, `unlocking`) should count as "moving
   towards" the target for read-back, not as a mismatch.
 
+Transitions (D23, checked against HA 2026.10):
+
+- `light.turn_on` takes `transition` in seconds: `VALID_TRANSITION` coerces to float and clamps
+  to 0–6553 (`light/const.py`). Homeo caps its own at 300 s.
+- A light that can fade reports `LightEntityFeature.TRANSITION` (32) in its `supported_features`
+  state attribute. Z-Wave JS lights set it when the device supports a transition duration
+  (`zwave_js/light.py`); light groups report the union of their members' features.
+- No other v1 writer's service takes a transition, so those targets are followed in steps.
+
 ## 8. Sun and solar times (§6, §12)
 
 - `sun.sun` attributes: `next_dawn`, `next_dusk`, `next_rising`, `next_setting`, `next_noon`,

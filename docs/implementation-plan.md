@@ -352,6 +352,36 @@ person's change back to that old value. When dry run is turned off (directive re
 binding forgets its last result, so the device's state stands in and the device is brought in
 line once, as for a new binding (D16).
 
+**I24. Behaviors (D23).** A binding result may move with the clock where the writer can follow
+it (`Writer.follows`: every numeric target). The checker allows moving results in arms and in
+`on(...)`, and marks blocks and `on(...)` as moving when a result moves, so the existing checks
+(no `age`/`previous` of a moving value, no product of two moving values) still apply to them.
+Results whose numbers aren't exact (built on a change time from before a restart) or aren't
+finite are `unknown`.
+
+The runtime compares a moving result with the previous one as lines: the previous result is
+advanced to now (`values.advance`) and compared value and rate, up to float rounding
+(`values.same_line`). A binding that follows a behavior keeps the current piece's end
+(`piece_end`), its range (`piece`) and the value last sent (`piece_target`):
+
+- **Pieces** end at the binding's next wake-up (the earliest instant its expression may change
+  shape, from the same wake-up bookkeeping as I1) or sooner. With transitions
+  (`Writer.supports_transition`: lights with feature 32), a piece is one `turn_on` to the value
+  at its end with `transition:` its length, at most `MAX_TRANSITION` (300 s), preceded by a call
+  setting the current value when the device doesn't match it (a jump). Without, a piece is one
+  step: the current value, lasting the time the behavior takes to move by the setting's
+  resolution (`Writer.step_time`), at least `MIN_STEP` (5 s). A first step is skipped when the
+  device already matches.
+- **When a ramp ends** (the result stops moving) exactly where the last piece's transition took
+  the device, nothing more is written.
+- **Manual changes:** `last_written` is the range of the previous and current pieces, so
+  in-between and late reports count as ours. A manual change (per binding) clears `piece_end`:
+  the line is still the last known result, so nothing is written until the result changes
+  shape. `keep` also clears it.
+- **Reloads** carry the piece state over; the reload's evaluation re-arms the wake-up.
+- `homeo.explain` shows a moving value with its rate ("76%, falling 24%/h") and a `following`
+  line; `device_matches` accepts anything along the current piece.
+
 **I23. Timestamps in the future.** A timestamp signal's `t(x)` is its most recent value at or
 before now: a value in the future (a phone's next-alarm sensor, `sensor.next_alarm - 30min`)
 happens when its time comes, and the runtime wakes up then. `on sensor.next_alarm:` fires when

@@ -577,14 +577,10 @@ class Checker:
             case A.OnCall(kwargs=kwargs):
                 params = []
                 for k in kwargs:
-                    v = self.resolve(k.value, ctx)
-                    if v.moving:
-                        self.fail(
-                            "this value changes continuously; it can't be a setting", k.value.span
-                        )
-                    params.append((k.name, v))
+                    params.append((k.name, self.resolve(k.value, ctx)))
                 text = "on(" + ", ".join(f"{n}: {v.text}" for n, v in params) + ")"
-                node = ir.OnValue(T.ONSPEC, e.span, text, False, params)
+                moving = any(v.moving for _, v in params)  # a behavior (D23)
+                node = ir.OnValue(T.ONSPEC, e.span, text, moving, params)
                 self._on_spans[id(node)] = {k.name: k.span for k in kwargs}
                 return node
             case A.Cascade(arms=arms):
@@ -1026,12 +1022,16 @@ class Checker:
     def cascade(self, arms: list[A.Arm | A.Group], span: Span, ctx: _Ctx) -> ir.Node:
         out = [self.arm(a, ctx, latest=False) for a in arms]
         t = self.join_results(out, span)
-        return ir.Cascade(t, span, "cascade", False, out)
+        return ir.Cascade(t, span, "cascade", self.any_moving(out), out)
 
     def latest(self, arms: list[A.Arm | A.Group], span: Span, ctx: _Ctx) -> ir.Node:
         out = [self.arm(a, ctx, latest=True) for a in arms]
         t = self.join_results(out, span)
-        return ir.Latest(t, span, "latest", False, out)
+        return ir.Latest(t, span, "latest", self.any_moving(out), out)
+
+    def any_moving(self, arms: list[ir.ArmIR | ir.GroupIR]) -> bool:
+        """Whether a block's result can be a behavior (D23): some arm's result moves."""
+        return any(r.moving for r in self.results(arms))
 
     def arm(self, a: A.Arm | A.Group, ctx: _Ctx, latest: bool) -> ir.ArmIR | ir.GroupIR:
         if isinstance(a, A.Group):
@@ -1039,13 +1039,7 @@ class Checker:
             subs = [self.arm(s, ctx, latest=False) for s in a.arms]
             return ir.GroupIR(guard, subs, a.span, guard.text, to_source(a.guard))
         cond = None if a.cond is None else self.arm_cond(a.cond, ctx, latest)
-        result = self.resolve(a.result, ctx)
-        if result.moving:
-            self.fail(
-                f"`{result.text}` changes continuously, so it can't be a result",
-                result.span,
-                "compare it first, e.g. `age(x) > 10min`",
-            )
+        result = self.resolve(a.result, ctx)  # may be a behavior (D23); bindings check it
         text = f"{'else' if cond is None else cond.text} -> {result.text}"
         cond_source = "else" if a.cond is None else to_source(a.cond)
         source = f"{cond_source} -> {to_source(a.result)}"
@@ -1168,9 +1162,9 @@ class Checker:
                     stmt.value.span,
                     "use `else -> keep` to leave the device alone otherwise",
                 )
-        if value.moving:
+        if value.moving and not writer.follows:
             self.fail(
-                f"`{value.text}` changes continuously, so it can't be bound",
+                f"`{value.text}` changes continuously, so it can't be bound to `{key}`",
                 value.span,
                 "compare it first, e.g. `age(x) > 10min`",
             )

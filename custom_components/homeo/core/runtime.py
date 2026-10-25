@@ -5,6 +5,8 @@
   next instant time alone could change it, and one host timer covers the earliest.
 - State machines settle (chains, loop detection) before bindings and actions run.
 - Bindings write when their known result changes (D16); actions fire once per occurrence (D14).
+- A result that moves with the clock (a behavior, D23) is followed in pieces: a transition per
+  piece (at most MAX_TRANSITION long) where the entity supports one, steps otherwise.
 """
 
 from __future__ import annotations
@@ -43,14 +45,20 @@ from .values import (
     Days,
     Num,
     OnSpec,
+    advance,
     compare,
+    hull,
+    is_definite,
+    is_moving,
     kleene_and,
     kleene_not,
     kleene_or,
     num_div,
     num_mul,
     parse_timestamp,
+    same_line,
     same_value,
+    snapshot,
 )
 
 
@@ -65,6 +73,10 @@ MAX_SETTLE_ROUNDS = 100
 # A timestamp replaced up to this long before its time still happened (I23): the device's
 # clock (a phone's next alarm) may run slightly ahead of HA's.
 CLOCK_GRACE = 1.0
+# Following a behavior (D23): the longest transition sent, and the shortest time between steps
+# for entities without transitions.
+MAX_TRANSITION = 300.0
+MIN_STEP = 5.0
 
 
 def maybe_before(t: float) -> Num:
@@ -122,7 +134,11 @@ class RSink:
     rank: int = 0
     wake: float = INF
     last_known: Any = NOTHING  # bindings
+    last_known_at: float = 0.0  # bindings: when last_known was evaluated (it may move, D23)
     last_written: Any = NOTHING  # bindings
+    piece_end: float = INF  # bindings following a behavior: when the current piece ends
+    piece: Any = NOTHING  # bindings following a behavior: the current piece's range
+    piece_target: Any = NOTHING  # ... and the value last sent for it
     last_handled: float = 0.0  # actions
     dry_run: bool = False
 
@@ -257,11 +273,13 @@ class Runtime:
         for s in self.sinks:
             old = old_sinks.get(s.key)
             if old is not None and type(old.defn) is type(s.defn):
-                s.last_known, s.last_written, s.last_handled = (
+                s.last_known, s.last_known_at, s.last_written, s.last_handled = (
                     old.last_known,
+                    old.last_known_at,
                     old.last_written,
                     old.last_handled,
                 )
+                s.piece_end, s.piece, s.piece_target = old.piece_end, old.piece, old.piece_target
                 if old.dry_run and not s.dry_run:
                     # Dry run turned off: nothing was really written, so bring the device in
                     # line once, as for a new binding (its state stands in, D16).
@@ -902,24 +920,95 @@ class Runtime:
 
     def _run_binding(self, s: RSink, b: ir.BindingDef) -> None:
         v = self._eval(b.expr)
+        horizon = self._cur_wake  # the next instant the result may change shape
+        if v is not UNKNOWN and v is not KEEP and not is_definite(v):
+            v = UNKNOWN  # e.g. a behavior built on a change time from before a restart (D23)
         if v is UNKNOWN:
             return  # leave the device alone; remember the last known result (D16)
         if v is KEEP:
             s.last_known = NOTHING  # device state stands in when keep ends (D5)
+            s.piece_end = INF
             return
-        if s.last_known is not NOTHING:
-            write = not same_value(v, s.last_known)
+        moving = is_moving(v)
+        if s.last_known is NOTHING:
+            # No previous result: the device's state stands in for it (D16).
+            state = self.host.get_state(b.entity_id)
+            new = not b.writer.matches(state, snapshot(v))
+            if moving:
+                new = True  # start following, from where the device is if it matches
+        elif moving or is_moving(s.last_known):
+            # A behavior's value is the whole line: compare lines at the same instant (D23).
+            new = not same_line(v, advance(s.last_known, self.now - s.last_known_at))
         else:
-            write = not b.writer.matches(self.host.get_state(b.entity_id), v)
-        s.last_known = v
-        if write:
-            self._write(s, b, v)
+            new = not same_value(v, s.last_known)
+        s.last_known, s.last_known_at = v, self.now
+        if not moving:
+            if new and self._arrived(s, v):
+                new = False  # a ramp ended where its last transition took the device (D23)
+            s.piece_end = INF
+            if new:
+                self._write(s, b, v)
+            return
+        if new:
+            jump = not b.writer.matches(self.host.get_state(b.entity_id), snapshot(v))
+            self._follow(s, b, v, horizon, jump=jump, continuing=False)
+        elif s.piece_end < INF:
+            if self.now >= s.piece_end - 1e-6:
+                self._follow(s, b, v, horizon, jump=False, continuing=True)
+            else:
+                self._wake_at(s.piece_end)
+        # else: a manual change stopped the following; it sticks until the result changes
+
+    def _arrived(self, s: RSink, v: Any) -> bool:
+        """Whether a piece being followed has just ended with the device sent exactly `v`."""
+        return (
+            s.piece_end < INF
+            and self.now >= s.piece_end - 1e-6
+            and s.piece_target is not NOTHING
+            and same_line(v, s.piece_target)
+        )
+
+    def _follow(
+        self, s: RSink, b: ir.BindingDef, v: Any, horizon: float, jump: bool, continuing: bool
+    ) -> None:
+        """Make the device follow a behavior for one more piece (D23). A piece is a straight
+        line ending at `horizon` (when the result may change shape) or sooner: one transition,
+        at most MAX_TRANSITION long, where the entity supports it; else one step of the
+        setting's resolution, at least MIN_STEP long."""
+        w = b.writer
+        state = self.host.get_state(b.entity_id)
+        start = snapshot(v)
+        calls: list[ServiceCall] = []
+        if w.supports_transition(state):
+            length = min(MAX_TRANSITION, horizon - self.now)
+            end = snapshot(advance(v, length))
+            if jump:
+                calls += w.calls(b.entity_id, start)
+            calls += w.with_transition(w.calls(b.entity_id, end), length)
+            piece, s.piece_target = hull(start, end), end
+        else:
+            length = min(max(MIN_STEP, w.step_time(v, state)), horizon - self.now)
+            if jump or continuing:
+                calls += w.calls(b.entity_id, start)
+            piece, s.piece_target = start, start
+        # Reports of the previous piece may still arrive, so manual-change detection accepts
+        # anything along both (D21).
+        written = hull(s.piece, piece) if continuing and s.piece is not NOTHING else piece
+        s.piece, s.piece_end = piece, self.now + length
+        self._wake_at(s.piece_end)
+        if calls:
+            self._send(s, b, calls, written)
+        elif not s.dry_run:
+            s.last_written = written
 
     def _write(self, s: RSink, b: ir.BindingDef, v: Any) -> None:
+        self._send(s, b, b.writer.calls(b.entity_id, v), v)
+
+    def _send(self, s: RSink, b: ir.BindingDef, calls: list[ServiceCall], written: Any) -> None:
         if not s.dry_run:
-            s.last_written = v  # what manual-change detection compares with (D21)
+            s.last_written = written  # what manual-change detection compares with (D21)
         source = f"{b.file}:{b.span.line}"
-        for call in b.writer.calls(b.entity_id, v):
+        for call in calls:
             call = ServiceCall(call.domain, call.service, call.data, call.entity_id, source, b.key)
             self._call(call, s.dry_run)
 
@@ -1020,7 +1109,9 @@ class Runtime:
     def _handle_state(self, ch: StateChange) -> None:
         self.now = max(self.now, ch.time)
         dirty: list[Any] = list(self.entity_cells.get(ch.entity_id, []))
-        manual = self._detect_manual(ch)
+        manual, manual_sinks = self._detect_manual(ch)
+        for s in manual_sinks:
+            s.piece_end = INF  # a manual change stops following a behavior (D23)
         if manual:
             for rc in dirty:
                 if isinstance(rc.defn, ir.ManualCell):
@@ -1035,28 +1126,30 @@ class Runtime:
         dirty.extend(sinks)
         self._propagate(dirty)
 
-    def _detect_manual(self, ch: StateChange) -> bool:
-        """D21: not our context, moves away from what we last wrote, not (un)availability."""
+    def _detect_manual(self, ch: StateChange) -> tuple[bool, list[RSink]]:
+        """D21: not our context, moves away from what we last wrote, not (un)availability.
+        Returns whether the change is manual, and the bindings whose part it changed."""
         if ch.ours or ch.old is None or ch.new is None:
-            return False
+            return False, []
         if not ch.old.available or not ch.new.available:
-            return False
+            return False, []
         if ch.new.state in TRANSITIONAL_STATES:
             # Progress reports of a slow device (a cover still moving) arrive with a fresh
             # context once HA stops reusing ours; judge the change when it settles.
-            return False
+            return False, []
         sinks = self.bindings_by_entity.get(ch.entity_id, [])
         if not sinks:
-            return ch.old.state != ch.new.state
+            return ch.old.state != ch.new.state, []
         # Per binding: manual if the part it drives changed, away from what it last wrote
         # (or it hasn't written anything yet).
+        manual = []
         for s in sinks:
             w = s.defn.writer  # type: ignore[union-attr]
             if w.view(ch.old) == w.view(ch.new):
                 continue
             if s.last_written is NOTHING or not w.matches(ch.new, s.last_written):
-                return True
-        return False
+                manual.append(s)
+        return bool(manual), manual
 
     def _handle_bus(self, event_type: str, data: dict[str, Any], t: float) -> None:
         self.now = max(self.now, t)

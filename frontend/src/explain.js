@@ -118,6 +118,7 @@ export function explanationHtml(e) {
           : "";
     facts.push(["device now", esc(e.device) + check]);
   }
+  if ("following" in e) facts.push(["following", esc(e.following)]);
   if ("last_written" in e) facts.push(["last written", esc(e.last_written)]);
   if (e.stopped) facts.push(["stopped", `<span class="error">${esc(e.stopped)}</span>`]);
   const arms = e.arms ?? e.latest;
