@@ -184,7 +184,7 @@ rationale are in `docs/implementation-plan.md` (IDs match); verified HA facts ar
 | I13 | `latest` with `\|` groups | Group competes by its guard's occurrence time; sub-arms are a first-match cascade |
 | I14 | Entity types | Inferred from domain, then attributes/current state; `any` when unsure |
 | I15 | Units | Only `%` is interpreted (scaled for light `brightness`); other units compare as plain numbers |
-| I16 | Time arithmetic | `ts − ts → duration`, `ts ± duration`, `time-of-day ± duration`; clock-moving values must be compared before use as results |
+| I16 | Time arithmetic | `ts − ts → duration`, `ts ± duration`, `time-of-day ± duration`; clock-moving values must be compared before use as results, except as results for numeric targets (D23) |
 | I17 | Cycles | `let` and binding cycles are errors (except via `manual()`); state machines break cycles, with a warning when a binding's target feeds back into its own rule through a machine (the runtime can't stop that loop) |
 | I18 | Writer read-back | `on(...)` matches when every given parameter matches; per-attribute tolerances; transitional states match their goal; `text.*` accepted like `input_text.*` |
 | I19 | Error format | `file:line:col: error: …`, caret snippet, optional `hint:` |
@@ -422,6 +422,77 @@ Decisions:
 - **Anything not in the table** (vacuums, alarm panels, water heaters, …) is handled with actions
   in v1 (`on x: vacuum.start()`). v2 may add user-defined writers that name the service to call
   for each value.
+
+### D23. Behaviors: values that change with the clock (Decided)
+
+Some values change continuously: `now`, `age(x)`, and arithmetic on them. Following classic FRP
+(Elliott and Hudak's *behaviors*, functions of continuous time), such a value is a **behavior**,
+and a binding may take one as its result. For example, a light that dims from 100% to 4% over the
+evening:
+
+```python
+light.living_room :=
+    now in 19:00..23:00     -> on(brightness: 100% - 96% * (age(19:00) / 4h))
+    now in 23:00..04:00     -> on(brightness: 4%)
+    else                    -> keep
+```
+
+The meaning doesn't change: **at every moment, the target should be the result's value at that
+moment.** The cascade above is piecewise: a ramp during the evening, then a constant. There are
+still no triggers or timers in the rule. Following the ramp is the writer's job.
+
+**Where behaviors are allowed.**
+- **As binding results for numeric targets:** light `brightness` and `kelvin`, fan
+  `percentage`, cover `position`, climate `temperature`, `input_number`/`number`, media
+  `volume`. This works directly, inside `on(...)`, and in cascade, `latest` and `if` arms.
+- **Nowhere that needs a value that changes at instants:** on/off and string targets, state
+  machine states, and anything that tracks history (`age`, `for`, `previous`, `on`, `latest`
+  conditions). These stay compile errors with the existing hint ("compare it first").
+  Comparisons of behaviors (`level < 50%`) work as before, with exact wake-ups (I1).
+
+**How a writer follows a behavior.** Homeo's numbers are piecewise linear in time (I1): they
+are straight lines between the instants where something in the expression changes, and the
+runtime already knows the next such instant. So the writer follows a behavior in **pieces**.
+Each piece is a straight line that ends at the next instant the expression may change shape
+(in the example, 23:00), or earlier:
+
+- **With transitions,** when the entity supports them (lights that report HA's transition
+  feature in `supported_features`): one call per piece. It sends the value at the end of the
+  piece with `transition:` set to the piece's length, **capped at 5 minutes**. The device fades
+  smoothly; the cap keeps pieces within device limits and keeps restarts, reloads and manual
+  changes from leaving a long fade running. If the device isn't already at the start value (the
+  first write, or a jump), a call setting the current value directly goes first.
+- **Without transitions** (everything else): **steps.** It writes the current value whenever
+  that has moved by the setting's resolution (1% for brightness, position and volume; 1% of the
+  value for kelvin; the entity's own step for fan speeds, setpoints and numbers), but no more
+  often than every 5 seconds.
+
+**Change detection and manual changes (D15, D16, D21).** A behavior's value is the whole line,
+not its reading at one instant. Following it is *one* write that plays out over time:
+- the binding writes when the result changes **shape**: another arm, another slope, a jump.
+  Otherwise it continues with the next piece;
+- **a manual change stops the following,** like any manual change. It sticks until the result
+  next changes (in the example, at 23:00). For more, add a `manual()` arm as usual (§15);
+- while following, a device report anywhere between the start of the previous piece and the end
+  of the current one counts as a report of our own writes, since lights report in-between values
+  mid-transition.
+
+**Unknown, restarts and reloads.**
+- A behavior that isn't known exactly (one built on a change time from before a restart, D17) is
+  `unknown`, so the device is left alone until it's definite.
+- **Restarts:** a behavior is a function of the clock, so it needs no storage. At boot the device
+  stands in for the previous result (D16). If the device is at the current value, following
+  resumes; otherwise it's set to the current value first.
+- **Reloads** keep the following state of bindings that still exist.
+
+**`homeo.explain`** shows a behavior's current value and how fast it changes, e.g. "62%, falling
+1.4%/h", and when the current piece ends.
+
+**Not part of D23** (candidates for later, if real rules need them):
+- a `transition:` setting for sudden changes (fading to 4% at 23:00, or fading off);
+- a `ramp(from, to, start..end)` shorthand;
+- `time-of-day − time-of-day` durations, so a ramp can span `sunset..23:00`;
+- reading `input_datetime` helpers as times of day.
 
 ---
 
@@ -1122,6 +1193,7 @@ on humidity > 90% for 30min:
 | D20 | "Since entering this state" | **Decided** | `fresh(x)`, only inside `state` blocks |
 | D21 | Manual-change detection | **Decided** | HA `Context` + differs from last write + not (un)availability; other automations count |
 | D22 | Declarative notifications | **Decided: not in v1** | maybe later: `notify.x := <message or none>` using tags/clear |
+| D23 | Behaviors | **Decided** | numeric targets may be bound to values that change with the clock; writers follow them in pieces: transitions (≤ 5 min) where supported, steps otherwise; a manual change stops the following until the result changes shape |
 
 ---
 
