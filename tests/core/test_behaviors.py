@@ -310,3 +310,85 @@ def test_explain_shows_rate_and_piece():
     r.h.set_state("light.hall", "on", {"supported_features": 32, "brightness": 255})
     (e,) = explain(r.rt, "light.hall")
     assert e["following"] == "stopped by a manual change, until the result changes shape"
+
+
+# ------------------------------------------------------------------ review fixes
+
+
+def test_explain_of_inexact_behavior_is_unknown():
+    r = Rig("light.hall := on(brightness: 100% - 1% * (age(sensor.lux) / 1min))", host=world())
+    r.restart()
+    r.h.advance(60)
+    (e,) = explain(r.rt, "light.hall")
+    assert e["result"] == "unknown"
+    assert "device_matches" not in e
+
+
+def test_piece_ends_at_a_cell_wake_up():
+    h = world()
+    h.advance_to(h.local(2026, 1, 5, 18, 57, 30))
+    r = Rig("light.hall := on(brightness: 50% * (age(every 1h) / 1h))", host=h)
+    # `every 1h` ticks at 19:00, where age() starts again: the piece ends there.
+    assert r.new_calls() == [
+        "light.turn_on light.hall brightness_pct=47.92",
+        "light.turn_on light.hall brightness_pct=50 transition=150",
+    ]
+
+
+def test_lapsed_piece_starts_again_from_the_device():
+    rule = """
+light.hall := on(brightness: 100% - 96% * (age(19:00) / 4h)) if sensor.lux < 500 else keep
+"""
+    h = world()
+    h.advance_to(h.local(2026, 1, 5, 18, 59))
+    r = Rig(rule, host=h)
+    at(r, 19)
+    r.new_calls()
+    at(r, 19, 1)
+    r.h.set_state("sensor.lux", "unavailable")
+    at(r, 20)
+    assert r.new_calls() == []
+    r.h.set_state("sensor.lux", "100")
+    # The light stopped at 98% (the 19:00 piece); the ramp is at 76% now.
+    assert r.new_calls() == [
+        "light.turn_on light.hall brightness_pct=76",
+        "light.turn_on light.hall brightness_pct=74 transition=300",
+    ]
+    sink = r.rt.binding("light.hall")
+    assert sink.last_written.get("brightness").lo == 74  # only this piece counts as ours
+
+
+def test_coalesce_falls_back_for_inexact_behavior():
+    r = Rig("input_number.target := (age(sensor.lux) / 1min) ?? 7", host=world())
+    r.new_calls()
+    r.restart()
+    assert r.new_calls() == ["input_number.set_value input_number.target value=7"]
+
+
+def test_values_are_clamped_to_the_setting_range():
+    rule = """
+light.hall :=
+    now in 19:00..23:00     -> on(brightness: 100% - 96% * (age(19:00) / 1h))
+    else                    -> keep
+"""
+    r = Rig(rule, host=world())
+    at(r, 20)
+    # The line reaches 0% at 20:02:30, so the piece ends there, and nothing more is sent.
+    assert r.new_calls()[-1] == "light.turn_on light.hall brightness_pct=0 transition=150"
+    at(r, 22)
+    assert r.new_calls() == []
+
+
+def test_numbers_are_clamped_to_min_and_max():
+    h = world(**{"input_number.target": ("50", {"min": 0, "max": 60, "step": 1})})
+    r = Rig("input_number.target := 50 + age(19:00) / 1min", host=h)
+    at(r, 19, 30)
+    assert r.new_calls()[-1] == "input_number.set_value input_number.target value=60"
+    at(r, 21)
+    assert r.new_calls() == []
+
+
+def test_steps_are_written_at_least_once_a_day():
+    rule = "input_number.target := 5 + (age(19:00) / 1h) * 0.000000000001"
+    r = Rig(rule, host=world())
+    assert max(r.h.pending_timers()) <= r.h.t + 86400

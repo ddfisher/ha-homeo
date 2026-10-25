@@ -77,6 +77,10 @@ CLOCK_GRACE = 1.0
 # for entities without transitions.
 MAX_TRANSITION = 300.0
 MIN_STEP = 5.0
+MAX_STEP = 86400.0  # a behavior that barely moves is still written once a day
+# A piece whose end passed this long ago without being continued (the result was unknown
+# meanwhile) has lapsed: following starts again from where the device is.
+PIECE_LAPSE = 1.0
 
 
 def maybe_before(t: float) -> Num:
@@ -139,6 +143,7 @@ class RSink:
     piece_end: float = INF  # bindings following a behavior: when the current piece ends
     piece: Any = NOTHING  # bindings following a behavior: the current piece's range
     piece_target: Any = NOTHING  # ... and the value last sent for it
+    deps_all: list[RCell] = field(default_factory=list)  # bindings: every cell read, transitively
     last_handled: float = 0.0  # actions
     dry_run: bool = False
 
@@ -340,6 +345,15 @@ class Runtime:
             s.rank = top
             for d in deps:
                 d.dependents.append(s)  # type: ignore[arg-type]
+            if isinstance(s.defn, ir.BindingDef):
+                seen: dict[int, RCell] = {}
+                todo = list(deps)
+                while todo:
+                    c = todo.pop()
+                    if id(c) not in seen:
+                        seen[id(c)] = c
+                        todo.extend(self.deps_of[id(c)])
+                s.deps_all = list(seen.values())
 
     def _sink_deps(self, s: RSink) -> list[ir.CellDef]:
         if isinstance(s.defn, ir.ActionDef):
@@ -639,7 +653,9 @@ class Runtime:
                 return self._compare(op, self._eval(a), self._eval(b))
             case ir.Coalesce(left=a, right=b):
                 v = self._eval(a)
-                return self._eval(b) if v is UNKNOWN else v
+                if v is UNKNOWN or (is_moving(v) and not is_definite(v)):
+                    return self._eval(b)  # a behavior known only as a range is unknown (D23)
+                return v
             case ir.IfElse(cond=c, then=t, otherwise=o):
                 cv = to_bool(self._eval(c))
                 if cv is UNKNOWN:
@@ -918,11 +934,51 @@ class Runtime:
         s.wake = self._cur_wake
         self._push_wake(s)
 
+    def binding_result(self, b: ir.BindingDef, v: Any) -> Any:
+        """A binding's result as it is written (D23): `unknown` unless every number in it is
+        known exactly (not a behavior built on a change time from before a restart), and numbers
+        clamped to their setting's range. Registers wake-ups for where a clamp starts or ends."""
+        if v is UNKNOWN or v is KEEP:
+            return v
+        if not is_definite(v):
+            return UNKNOWN
+        w, state = b.writer, self.host.get_state(b.entity_id)
+        if isinstance(v, OnSpec):
+            return OnSpec(tuple((k, self._clamp(x, w.bounds(k, state))) for k, x in v.params))
+        return self._clamp(v, w.bounds(None, state))
+
+    def _clamp(self, n: Any, bounds: tuple[float, float] | None) -> Any:
+        """`n` limited to `bounds`: beyond a bound it's that bound, constant until the line comes
+        back (then a wake-up); inside, a wake-up for when it reaches one."""
+        if bounds is None or not isinstance(n, Num):
+            return n
+        lo, hi = bounds
+        x, r = n.lo, n.rlo
+        if x < lo or (x == lo and r < 0):
+            if r > 0:
+                self._wake_at(self.now + (lo - x) / r)
+            return Num.of(lo)
+        if x > hi or (x == hi and r > 0):
+            if r < 0:
+                self._wake_at(self.now + (x - hi) / -r)
+            return Num.of(hi)
+        if r > 0:
+            self._wake_at(self.now + (hi - x) / r)
+        elif r < 0:
+            self._wake_at(self.now + (x - lo) / -r)
+        return n
+
+    def _horizon(self, s: RSink) -> float:
+        """The next instant a binding's result may change shape: its own wake-up, or that of a
+        cell it reads (a time point's daily reset of `age(19:00)`, an `every` tick)."""
+        h = self._cur_wake
+        for c in s.deps_all:
+            if self.now < c.wake < h:
+                h = c.wake
+        return h
+
     def _run_binding(self, s: RSink, b: ir.BindingDef) -> None:
-        v = self._eval(b.expr)
-        horizon = self._cur_wake  # the next instant the result may change shape
-        if v is not UNKNOWN and v is not KEEP and not is_definite(v):
-            v = UNKNOWN  # e.g. a behavior built on a change time from before a restart (D23)
+        v = self.binding_result(b, self._eval(b.expr))
         if v is UNKNOWN:
             return  # leave the device alone; remember the last known result (D16)
         if v is KEEP:
@@ -930,6 +986,7 @@ class Runtime:
             s.piece_end = INF
             return
         moving = is_moving(v)
+        horizon = self._horizon(s) if moving else INF
         if s.last_known is NOTHING:
             # No previous result: the device's state stands in for it (D16).
             state = self.host.get_state(b.entity_id)
@@ -953,7 +1010,11 @@ class Runtime:
             jump = not b.writer.matches(self.host.get_state(b.entity_id), snapshot(v))
             self._follow(s, b, v, horizon, jump=jump, continuing=False)
         elif s.piece_end < INF:
-            if self.now >= s.piece_end - 1e-6:
+            if self.now > s.piece_end + PIECE_LAPSE:
+                # The piece ended a while ago (the result was unknown since): start again.
+                jump = not b.writer.matches(self.host.get_state(b.entity_id), snapshot(v))
+                self._follow(s, b, v, horizon, jump=jump, continuing=False)
+            elif self.now >= s.piece_end - 1e-6:
                 self._follow(s, b, v, horizon, jump=False, continuing=True)
             else:
                 self._wake_at(s.piece_end)
@@ -987,7 +1048,7 @@ class Runtime:
             calls += w.with_transition(w.calls(b.entity_id, end), length)
             piece, s.piece_target = hull(start, end), end
         else:
-            length = min(max(MIN_STEP, w.step_time(v, state)), horizon - self.now)
+            length = min(max(MIN_STEP, w.step_time(v, state)), horizon - self.now, MAX_STEP)
             if jump or continuing:
                 calls += w.calls(b.entity_id, start)
             piece, s.piece_target = start, start

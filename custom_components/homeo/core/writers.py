@@ -16,6 +16,7 @@ setting's resolution takes (`step_time`). Values given to `matches` may be range
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,7 +39,7 @@ def _range(v: Any) -> tuple[float, float] | None:
 def _within(actual: float | None, want: Any, to_read, tol: float) -> bool:
     """`actual` matches `want` (a value or a range), converted for read-back by `to_read`."""
     r = _range(want)
-    if actual is None or r is None:
+    if actual is None or r is None or not all(math.isfinite(x) for x in r):
         return False
     a, b = to_read(r[0]), to_read(r[1])
     return min(a, b) - tol <= actual <= max(a, b) + tol
@@ -67,6 +68,7 @@ class OnParam:
     to_read: Any  # value -> expected attribute value
     tolerance: Any  # state -> tolerance
     resolution: Any  # (state, value) -> smallest change worth a step, in homeo's units (D23)
+    bounds: Any  # state -> (lo, hi) the setting is clamped to, or None (D23)
 
 
 class Writer:
@@ -87,6 +89,10 @@ class Writer:
     def resolution(self, name: str | None, state: EntityState | None, value: float) -> float:
         """The smallest change of a setting (`name`; None for the value itself) worth a step."""
         return 1.0
+
+    def bounds(self, name: str | None, state: EntityState | None) -> tuple[float, float] | None:
+        """The range a numeric setting (`name`; None for the value itself) is clamped to."""
+        return None
 
     def step_time(self, value: Any, state: EntityState | None) -> float:
         """How long until a behavior has moved by one step of resolution (D23)."""
@@ -192,6 +198,10 @@ class OnOffWriter(Writer):
         p = self.on_params.get(name or "")
         return p.resolution(state, value) if p else 1.0
 
+    def bounds(self, name: str | None, state: EntityState | None) -> tuple[float, float] | None:
+        p = self.on_params.get(name or "")
+        return p.bounds(state) if p else None
+
     @property
     def read_attrs(self) -> frozenset[str | None]:
         return frozenset({None, *(p.read_attr for p in self.on_params.values())})
@@ -228,6 +238,7 @@ LIGHT_PARAMS = {
         _pct_to_255,
         lambda s: 3,
         lambda s, v: 1.0,
+        lambda s: (0.0, 100.0),
     ),
     "kelvin": OnParam(
         "kelvin",
@@ -238,6 +249,7 @@ LIGHT_PARAMS = {
         lambda v: _num(v),
         lambda s: 0.02 * (_num(s.attributes.get("color_temp_kelvin")) or 3000),
         lambda s, v: max(10.0, 0.01 * v),
+        lambda s: _attr_bounds(s, "min_color_temp_kelvin", "max_color_temp_kelvin"),
     ),
 }
 
@@ -251,6 +263,7 @@ FAN_PARAMS = {
         lambda v: _num(v),
         lambda s: max(1.0, (_num(s.attributes.get("percentage_step")) or 1.0) / 2),
         lambda s, v: (_num(s.attributes.get("percentage_step")) if s else None) or 1.0,
+        lambda s: (0.0, 100.0),
     ),
 }
 
@@ -298,6 +311,7 @@ class ServiceValueWriter(Writer):
         expected=None,
         tolerance=None,
         resolution=None,
+        bounds=None,
     ):
         self.domain = domain
         self.attr = attr
@@ -310,6 +324,7 @@ class ServiceValueWriter(Writer):
         self.expected = expected or self.convert
         self.tolerance = tolerance
         self._resolution = resolution
+        self._bounds = bounds
         self.follows = resolution is not None
 
     def calls(self, entity_id: str, value: Any) -> list[ServiceCall]:
@@ -321,6 +336,9 @@ class ServiceValueWriter(Writer):
 
     def resolution(self, name: str | None, state: EntityState | None, value: float) -> float:
         return self._resolution(state) if self._resolution else 1.0
+
+    def bounds(self, name: str | None, state: EntityState | None) -> tuple[float, float] | None:
+        return self._bounds(state) if self._bounds else None
 
     def _actual(self, state: EntityState) -> Any:
         return state.attributes.get(self.read_attr) if self.read_attr else state.state
@@ -353,6 +371,14 @@ def _step_tol(attr: str, default: float):
         return (step / 2) if step else default
 
     return tol
+
+
+def _attr_bounds(state: EntityState | None, lo: str, hi: str) -> tuple[float, float] | None:
+    """A setting's range from the entity's own attributes (e.g. `min`/`max`), if it has both."""
+    if state is None:
+        return None
+    a, b = _num(state.attributes.get(lo)), _num(state.attributes.get(hi))
+    return (a, b) if a is not None and b is not None and a <= b else None
 
 
 def _step(attr: str, default: float):
@@ -390,6 +416,7 @@ def build_writers() -> dict[tuple[str, str | None], Writer]:
         convert=_float,
         tolerance=_step_tol("target_temp_step", 0.25),
         resolution=_step("target_temp_step", 0.5),
+        bounds=lambda s: _attr_bounds(s, "min_temp", "max_temp"),
     )
     w[("cover", None)] = StateServiceWriter(
         "cover",
@@ -407,6 +434,7 @@ def build_writers() -> dict[tuple[str, str | None], Writer]:
         convert=lambda v: int(round(_num(v))),
         tolerance=lambda s: 1,
         resolution=lambda s: 1.0,
+        bounds=lambda s: (0.0, 100.0),
     )
     for d in ("input_number", "number"):
         w[(d, None)] = ServiceValueWriter(
@@ -418,6 +446,7 @@ def build_writers() -> dict[tuple[str, str | None], Writer]:
             convert=_float,
             tolerance=_step_tol("step", 1e-6),
             resolution=_step("step", 1.0),
+            bounds=lambda s: _attr_bounds(s, "min", "max"),
         )
     for d in ("input_select", "select"):
         w[(d, None)] = ServiceValueWriter(
@@ -443,6 +472,7 @@ def build_writers() -> dict[tuple[str, str | None], Writer]:
         convert=lambda v: round(_num(v) / 100, 4),
         tolerance=lambda s: 0.01,
         resolution=lambda s: 1.0,
+        bounds=lambda s: (0.0, 100.0),
     )
     return w
 

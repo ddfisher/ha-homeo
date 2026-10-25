@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import deque
 from collections.abc import Callable
@@ -47,6 +48,9 @@ class HassHost:
         self.tz = dt_util.get_default_time_zone()
         self._our_ids: deque[str] = deque(maxlen=_OUR_CONTEXTS)
         self._our_set: set[str] = set()
+        # The last call task per entity: calls to one entity run in order (a jump to a
+        # behavior's current value, then its transition, D23).
+        self._last_call: dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------- catalog
 
@@ -130,11 +134,23 @@ class HassHost:
             context=ctx,
         )
         target = {"entity_id": call.entity_id} if call.entity_id else None
-        self.hass.async_create_task(
-            self._call(call, target, ctx), f"homeo {call.domain}.{call.service}"
+        before = self._last_call.get(call.entity_id) if call.entity_id else None
+        task = self.hass.async_create_task(
+            self._call(call, target, ctx, before), f"homeo {call.domain}.{call.service}"
         )
+        if call.entity_id:
+            self._last_call[call.entity_id] = task
+            task.add_done_callback(lambda t, e=call.entity_id: self._forget_call(e, t))
 
-    async def _call(self, call: ServiceCall, target: dict | None, ctx: Context) -> None:
+    def _forget_call(self, entity_id: str, task: asyncio.Task) -> None:
+        if self._last_call.get(entity_id) is task:
+            del self._last_call[entity_id]
+
+    async def _call(
+        self, call: ServiceCall, target: dict | None, ctx: Context, before: asyncio.Task | None
+    ) -> None:
+        if before is not None and not before.done():
+            await asyncio.wait([before])  # its errors are logged by its own task
         try:
             await self.hass.services.async_call(
                 call.domain, call.service, call.data, blocking=True, context=ctx, target=target

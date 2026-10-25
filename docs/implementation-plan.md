@@ -356,22 +356,29 @@ line once, as for a new binding (D16).
 it (`Writer.follows`: every numeric target). The checker allows moving results in arms and in
 `on(...)`, and marks blocks and `on(...)` as moving when a result moves, so the existing checks
 (no `age`/`previous` of a moving value, no product of two moving values) still apply to them.
-Results whose numbers aren't exact (built on a change time from before a restart) or aren't
-finite are `unknown`.
+`Runtime.binding_result` turns an evaluated result into what is written (explain uses it too):
+`unknown` if a number isn't exact (built on a change time from before a restart) or finite, and
+each number clamped to `Writer.bounds`, with wake-ups where the line reaches or leaves a bound.
+`??` treats a moving value that isn't exact as `unknown`.
 
 The runtime compares a moving result with the previous one as lines: the previous result is
 advanced to now (`values.advance`) and compared value and rate, up to float rounding
 (`values.same_line`). A binding that follows a behavior keeps the current piece's end
 (`piece_end`), its range (`piece`) and the value last sent (`piece_target`):
 
-- **Pieces** end at the binding's next wake-up (the earliest instant its expression may change
-  shape, from the same wake-up bookkeeping as I1) or sooner. With transitions
+- **Pieces** end at the binding's next wake-up or sooner. That is the earliest instant its
+  expression may change shape: the wake-ups registered while evaluating it (I1, and the clamp
+  bounds), and those of every cell it reads, transitively (`RSink.deps_all`), since a time point
+  or `every` tick resets an `age()` without the binding's own comparisons noticing. With transitions
   (`Writer.supports_transition`: lights with feature 32), a piece is one `turn_on` to the value
   at its end with `transition:` its length, at most `MAX_TRANSITION` (300 s), preceded by a call
   setting the current value when the device doesn't match it (a jump). Without, a piece is one
   step: the current value, lasting the time the behavior takes to move by the setting's
-  resolution (`Writer.step_time`), at least `MIN_STEP` (5 s). A first step is skipped when the
-  device already matches.
+  resolution (`Writer.step_time`), at least `MIN_STEP` (5 s) and at most a day. A first step
+  is skipped when the device already matches.
+- **A lapsed piece** (its end passed more than `PIECE_LAPSE`, 1 s, ago without a continuation,
+  because the result was `unknown`) starts the following again, with a jump if the device
+  doesn't match.
 - **When a ramp ends** (the result stops moving) exactly where the last piece's transition took
   the device, nothing more is written.
 - **Manual changes:** `last_written` is the range of the previous and current pieces, so
@@ -379,6 +386,8 @@ advanced to now (`values.advance`) and compared value and rate, up to float roun
   the line is still the last known result, so nothing is written until the result changes
   shape. `keep` also clears it.
 - **Reloads** carry the piece state over; the reload's evaluation re-arms the wake-up.
+- **Order:** `HassHost` runs the calls to one entity one after another (each task waits for the
+  previous one), so a jump lands before its transition.
 - `homeo.explain` shows a moving value with its rate ("76%, falling 24%/h") and a `following`
   line; `device_matches` accepts anything along the current piece.
 

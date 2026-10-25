@@ -90,7 +90,10 @@ class _Explainer:
     # ------------------------------------------------------------- statements
 
     def binding(self, s: RSink, b: ir.BindingDef) -> dict[str, Any]:
-        result = self.eval(b.expr)
+        try:
+            result = self.rt.binding_result(b, self.eval(b.expr))  # as the runtime writes it
+        except Exception:  # noqa: BLE001 - an explanation must not fail on one bad node
+            result = UNKNOWN
         state = self.rt.host.get_state(b.entity_id)
         out: dict[str, Any] = {
             "binding": b.key,
