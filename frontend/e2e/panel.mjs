@@ -114,7 +114,7 @@ try {
   check("hover: let value", /value\s+\d/.test(tip) && tip.includes("let co2"), tip);
   await shot("panel-hover");
   tip = await hoverText("    bath_mode == \"boost\"  ", "bath_mode");
-  check("hover: state machine value", tip.includes("state machine") && tip.includes('"auto"'), tip);
+  check("hover: state machine value", tip.includes("state machine") && /value\s+"auto"/.test(tip), tip);
   await page.mouse.move(5, 5);
 
   // Typing must not trigger HA's keyboard shortcuts (`e`, `c`, `a`, `m` open dialogs).

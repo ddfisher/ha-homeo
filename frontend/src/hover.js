@@ -129,7 +129,9 @@ function serviceInfo(domain, name, services, entityId) {
 export function definitions(docText) {
   const out = {};
   for (const m of docText.matchAll(/^(let|state)\s+([A-Za-z_]\w*)[^\n]*/gm)) {
-    out[m[2]] ??= { kind: m[1], line: m[0].replace(/\s+#.*$/, "").trim() };
+    // the first line, without a comment or the spaces that align `=` with neighbouring lines
+    const line = m[0].replace(/\s+#.*$/, "").trim().replace(/^(\S+\s+\w+)\s+=\s+/, "$1 = ");
+    out[m[2]] ??= { kind: m[1], line };
   }
   return out;
 }

@@ -146,6 +146,8 @@ test("let and state names look up their value", () => {
   assert.equal(mode.kind, "state machine");
   assert.equal(mode.lookup, "mode");
   assert.equal(describe(Text.of(["let x = y"]), 8, HASS, NOW), null); // not defined here
+  const aligned = describe(Text.of(["let co2    = sensor.co2  # ppm", "let y = co2"]), 40, HASS, NOW);
+  assert.equal(aligned.info.example, "let co2 = sensor.co2");
 });
 
 test("value rows", () => {
