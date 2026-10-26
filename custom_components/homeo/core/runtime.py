@@ -58,6 +58,7 @@ from .values import (
     parse_timestamp,
     same_line,
     same_value,
+    snap,
     snapshot,
 )
 
@@ -954,11 +955,9 @@ class Runtime:
             return n
         lo, hi = bounds
         x, r = n.lo, n.rlo
-        for b in (lo, hi):
-            if r and self.now + (b - x) / r == self.now:
-                # Reaches the bound too soon for the clock to tell apart from now (rounding left
-                # it a hair away): it's at the bound, else its wake-up would be lost (I24).
-                x = b
+        x = snap(snap(x, r, lo, self.now), r, hi, self.now)  # rounding left it a hair away
+        if x != n.lo:
+            n = Num(x, x, r, r)
         if x < lo or (x == lo and r < 0):
             if r > 0:
                 self._wake_at(self.now + (lo - x) / r)

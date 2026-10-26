@@ -1,6 +1,7 @@
 """Behaviors: binding results that move with the clock (D23)."""
 
 from custom_components.homeo.core.explain import explain
+from custom_components.homeo.core.values import INF, Num
 
 from .fakehost import standard_world
 from .rig import Rig
@@ -393,6 +394,28 @@ def test_clamp_holds_when_rounding_leaves_the_line_a_hair_from_the_bound():
     assert min(brightnesses(calls)) == 0
     at(r, 23)
     assert r.new_calls() == []
+
+
+def test_clamp_counts_a_bound_reached_within_a_clock_tick():
+    rt = Rig("", host=world()).rt
+    # 5e-10% above 0% and falling: it reaches 0% in 5.6e-8 s, which rounds to now.
+    rt._cur_wake = INF
+    assert rt._clamp(Num(5e-10, 5e-10, -0.009, -0.009), (0, 100)) == Num.of(0)
+    assert rt._cur_wake == INF  # constant from here: nothing to wake up for
+    # 5e-10% below 0% and rising: in range now, so not left a hair below it.
+    rt._cur_wake = INF
+    assert rt._clamp(Num(-5e-10, -5e-10, 0.009, 0.009), (0, 100)) == Num(0, 0, 0.009, 0.009)
+    assert rt._cur_wake == rt.now + 100 / 0.009  # when it reaches 100%
+
+
+def test_comparison_flips_when_rounding_leaves_it_a_hair_short():
+    # The difference reaches 0 at 19:01:49 a hair short; the wake-up for the rest of the way
+    # used to round to now and be lost, so the pump never turned on.
+    r = Rig("switch.pump := (1% - 33% * (age(19:00) / 1h)) < 0%", host=world())
+    at(r, 19)
+    r.new_calls()
+    at(r, 19, 1, 50)
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
 
 
 def test_rising_line_leaves_the_lower_bound_and_stops_at_the_upper():

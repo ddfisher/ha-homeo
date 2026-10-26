@@ -9,7 +9,8 @@ Comparisons of `Num`s are three-valued (definite only if the whole interval is o
 report the instant at which their result could next change, so the runtime can schedule a
 wake-up instead of polling. Comparisons are evaluated "just after" the evaluation instant
 (right limit), so at the exact crossing time of a moving value the comparison already shows its
-new result and no epsilon wake-ups are needed.
+new result and no epsilon wake-ups are needed. Rounding can leave a value a hair short of a
+crossing at that instant; `snap` counts it as there.
 """
 
 from __future__ import annotations
@@ -126,6 +127,16 @@ def num_div(a: Num, b: Num) -> Num | _Unknown:
     return Num(min(corners), max(corners))
 
 
+def snap(v: float, r: float, target: float, now: float) -> float:
+    """`v` (moving at rate `r`), or `target` if it gets there too soon after (or before) `now`
+    for the clock to tell apart. At the instant a line reaches a crossing or a bound, rounding
+    can leave it a hair away; a wake-up for the rest of the way would round to `now` and be
+    lost, so the line would never get there."""
+    if r and math.isfinite(v) and now + (target - v) / r == now:
+        return target
+    return v
+
+
 def _sign_after(v: float, r: float) -> int:
     """Sign of a bound just after now (right limit)."""
     if math.isnan(v):
@@ -148,9 +159,10 @@ def _crossing(v: float, r: float, now: float) -> float:
 def compare(op: str, a: Num, b: Num, now: float) -> tuple[bool | _Unknown, float]:
     """Three-valued comparison of `a op b`, and the next instant its result may change."""
     d = a - b
-    lo = _sign_after(d.lo, d.rlo)  # sign of the smallest possible a - b
-    hi = _sign_after(d.hi, d.rhi)  # sign of the largest possible a - b
-    wake = min(_crossing(d.lo, d.rlo, now), _crossing(d.hi, d.rhi, now))
+    dlo, dhi = snap(d.lo, d.rlo, 0.0, now), snap(d.hi, d.rhi, 0.0, now)
+    lo = _sign_after(dlo, d.rlo)  # sign of the smallest possible a - b
+    hi = _sign_after(dhi, d.rhi)  # sign of the largest possible a - b
+    wake = min(_crossing(dlo, d.rlo, now), _crossing(dhi, d.rhi, now))
     if op == "<":
         result = True if hi < 0 else False if lo >= 0 else UNKNOWN
     elif op == "<=":
