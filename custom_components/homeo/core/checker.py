@@ -512,7 +512,8 @@ class Checker:
                 )
             case A.Binary(op="+" | "-" | "*" | "/" as op, left=l, right=r):
                 node = self.arith(op, self.resolve(l, ctx), self.resolve(r, ctx), e.span)
-                self._arith_source[id(node)] = e
+                if isinstance(node, ir.Arith):
+                    self._arith_source[id(node)] = e
                 return node
             case A.Binary(op="??", left=l, right=r):
                 a, b = self.resolve(l, ctx), self.resolve(r, ctx)
@@ -706,30 +707,51 @@ class Checker:
         return ir.Arith(result, span, text, a.moving or b.moving, op, a, b)
 
     def percent_order_hint(self, n: ir.Node) -> str | None:
-        """For a number where a percentage is wanted: a hint if it's a number only because of a
-        `number * percentage` (a percentage stays one only when it comes first), and putting
-        the percentages first would make it a percentage."""
-        swapped: list[ir.Arith] = []
+        """For a number where a percentage is wanted: a hint if it's a number only because of
+        `number * percentage` products (a percentage stays one only when it comes first), and
+        putting the percentages first would make it a percentage. Quotes each product as
+        written (`let` names, not inlined), with the products inside it swapped too."""
+        numeric = NUMERIC | {T.ANY}
+        swapped: dict[int, A.Binary] = {}  # AST id -> product to swap
 
         def retype(x: ir.Node) -> T:
             if isinstance(x, ir.Neg):
                 return retype(x.operand)
-            if isinstance(x, ir.Arith) and x.left.type in NUMERIC and x.right.type in NUMERIC:
+            if isinstance(x, ir.Arith) and x.left.type in numeric and x.right.type in numeric:
                 a, b = retype(x.left), retype(x.right)
-                if x.op == "*" and a == T.NUMBER and b == T.PERCENT:
-                    swapped.append(x)
+                if x.op == "*" and a in (T.NUMBER, T.ANY) and b == T.PERCENT:
+                    e = self._arith_source[id(x)]
+                    swapped[id(e)] = e
                     a, b = b, a
                 return numeric_result(x.op, a, b)
             return x.type
 
         if retype(n) != T.PERCENT or not swapped:
             return None
-        e = self._arith_source[id(swapped[0])]  # as written, with `let` names (not inlined)
-        fixed = to_source(A.Binary(e.span, "*", e.right, e.left))
-        return (
-            f"`{to_source(e)}` is a number, not a percentage: a percentage stays one only when "
-            f"it comes first. Write `{fixed}`"
+
+        inner: set[int] = set()  # swapped products written inside another one
+
+        def fixed(e: A.Expr, top: bool = True) -> A.Expr:
+            if isinstance(e, A.Unary) and e.op == "-":
+                return A.Unary(e.span, e.op, fixed(e.operand, False))
+            if isinstance(e, A.Binary) and e.op in ("+", "-", "*", "/"):
+                left, right = fixed(e.left, False), fixed(e.right, False)
+                if id(e) in swapped:
+                    if not top:
+                        inner.add(id(e))
+                    return A.Binary(e.span, "*", right, left)
+                return A.Binary(e.span, e.op, left, right)
+            return e
+
+        rewrites = [(e, fixed(e)) for e in swapped.values()]
+        outer = sorted(
+            ((e, f) for e, f in rewrites if id(e) not in inner),
+            key=lambda ef: (ef[0].span.line, ef[0].span.col),
         )
+        written = " and ".join(f"`{to_source(e)}`" for e, _ in outer)
+        fixes = " and ".join(f"`{to_source(f)}`" for _, f in outer)
+        what = "is a number, not a percentage" if len(outer) == 1 else "are numbers"
+        return f"{written} {what}: a percentage stays one only when it comes first. Write {fixes}"
 
     @staticmethod
     def paren_arith(n: ir.Node) -> str:

@@ -334,6 +334,30 @@ def test_volume_hints_to_put_the_percent_first(host):
     assert "Write `10% * (age(19:00) / 1h)`" in d.hint
 
 
+def test_percent_order_hint_swaps_nested_products_in_one_go(host):
+    d = err(host, "light.hall := on(brightness: 100% - 2 * (age(19:00) / 1h * 10%))")
+    assert d.hint.startswith("`2 * (age(19:00) / 1h * 10%)` is a number")
+    assert d.hint.endswith("Write `10% * (age(19:00) / 1h) * 2`")
+    ok(host, "light.hall := on(brightness: 100% - 10% * (age(19:00) / 1h) * 2)")
+
+
+def test_percent_order_hint_names_every_product_to_swap(host):
+    src = """
+let ramp = age(19:00) / 1h * 10%
+light.hall := on(brightness: 100% - 2 * ramp)
+"""
+    assert err(host, src).hint == (
+        "`age(19:00) / 1h * 10%` and `2 * ramp` are numbers: a percentage stays one only when "
+        "it comes first. Write `10% * (age(19:00) / 1h)` and `ramp * 2`"
+    )
+
+
+def test_percent_order_hint_for_values_typed_at_run_time(host):
+    d = err(host, "light.hall := on(brightness: sun.sun.elevation * 2%)")
+    assert d.hint.endswith("Write `2% * sun.sun.elevation`")
+    ok(host, "light.hall := on(brightness: 2% * sun.sun.elevation)")
+
+
 def test_no_percent_order_hint_when_swapping_would_not_help(host):
     # `5 + …` is a number whichever way the product is written.
     assert err(host, "light.hall := on(brightness: 5 + age(19:00) / 1h * 10%)").hint is None
