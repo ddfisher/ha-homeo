@@ -313,54 +313,31 @@ def test_brightness_needs_percent(host):
     assert "takes a percentage" in d.message and d.hint is None
 
 
-def test_number_times_percent_hints_to_put_the_percent_first(host):
-    # The hint quotes the source, with `let` names, and keeps the parentheses it needs.
+def test_a_product_with_a_percentage_is_one_in_either_order(host):
     src = """
 let start = 19:00
 let ramp = 100% - (age(start) / 3h) * 96%
 light.hall := on(brightness: ramp)
 """
-    d = err(host, src)
-    assert "takes a percentage" in d.message
-    assert d.hint == (
-        "`age(start) / 3h * 96%` is a number, not a percentage: a percentage stays one only "
-        "when it comes first. Write `96% * (age(start) / 3h)`"
-    )
-    ok(host, "light.hall := on(brightness: 100% - 96% * (age(19:00) / 3h))")
+    ok(host, src)
+    ok(host, "media_player.tv.volume := 50% - age(19:00) / 1h * 10%")
+    ok(host, "light.hall := on(brightness: 100% - 2 * (age(19:00) / 1h * 10%))")
+    ok(host, "light.hall := on(brightness: sun.sun.elevation * 2%)")  # typed at run time
+    ok(host, "media_player.tv.volume := 2 * 25%")  # two constants, folded
 
 
-def test_volume_hints_to_put_the_percent_first(host):
-    d = err(host, "media_player.tv.volume := 50% - age(19:00) / 1h * 10%")
-    assert "Write `10% * (age(19:00) / 1h)`" in d.hint
+def test_adding_a_number_or_dividing_by_a_percentage_gives_a_number(host):
+    for expr in ("5 + age(19:00) / 1h * 10%", "age(19:00) / 1h / 10%"):
+        d = err(host, f"light.hall := on(brightness: {expr})")
+        assert "takes a percentage" in d.message
 
 
-def test_percent_order_hint_swaps_nested_products_in_one_go(host):
-    d = err(host, "light.hall := on(brightness: 100% - 2 * (age(19:00) / 1h * 10%))")
-    assert d.hint.startswith("`2 * (age(19:00) / 1h * 10%)` is a number")
-    assert d.hint.endswith("Write `10% * (age(19:00) / 1h) * 2`")
-    ok(host, "light.hall := on(brightness: 100% - 10% * (age(19:00) / 1h) * 2)")
-
-
-def test_percent_order_hint_names_every_product_to_swap(host):
-    src = """
-let ramp = age(19:00) / 1h * 10%
-light.hall := on(brightness: 100% - 2 * ramp)
-"""
-    assert err(host, src).hint == (
-        "`age(19:00) / 1h * 10%` and `2 * ramp` are numbers: a percentage stays one only when "
-        "it comes first. Write `10% * (age(19:00) / 1h)` and `ramp * 2`"
-    )
-
-
-def test_percent_order_hint_for_values_typed_at_run_time(host):
-    d = err(host, "light.hall := on(brightness: sun.sun.elevation * 2%)")
-    assert d.hint.endswith("Write `2% * sun.sun.elevation`")
-    ok(host, "light.hall := on(brightness: 2% * sun.sun.elevation)")
-
-
-def test_no_percent_order_hint_when_swapping_would_not_help(host):
-    # `5 + …` is a number whichever way the product is written.
-    assert err(host, "light.hall := on(brightness: 5 + age(19:00) / 1h * 10%)").hint is None
+def test_number_times_percent_against_brightness_is_scaled(host):
+    p = ok(host, "let b = light.hall.brightness > 2 * 25%\nlight.porch := b\n")
+    assert p.bindings[0].expr.right.value.lo == pytest.approx(127.5)
+    src = "let b = light.hall.brightness > age(19:00) / 1h * 25%\nlight.porch := b\n"
+    right = ok(host, src).bindings[0].expr.right
+    assert isinstance(right, ir.Scale) and right.factor == 2.55
 
 
 def test_on_spec_not_for_switch(host):

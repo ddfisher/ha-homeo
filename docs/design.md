@@ -351,7 +351,7 @@ Attribute names that aren't identifiers use `light.hall["rgb color"]`.
 | Literal | Meaning |
 |---|---|
 | `30s`, `5min`, `2h`, `1d`, `1h30min` | durations. `m` is deliberately **not** minutes (it reads like metres). |
-| `50%` | percent. Compared with a `%` sensor, it means 50. As a brightness (`on(brightness: 50%)`) it's sent as `brightness_pct`, and compared with HA's 0–255 `brightness` when read back. |
+| `50%` | percent. Compared with a `%` sensor, it means 50. As a brightness (`on(brightness: 50%)`) it's sent as `brightness_pct`, and compared with HA's 0–255 `brightness` when read back. In arithmetic it's the number 50, not 0.5. A product with a percentage on either side is a percentage (`96% * x` and `x * 96%`), as is a percentage divided by a number or a percentage (`50% / 2`) and the sum or difference of two percentages. `50 + 10%` and `x / 10%` are plain numbers. |
 | `07:00`, `22:30` | time of day (in ranges and comparisons), or a time point (§12) |
 | `sunrise`, `sunset`, `sunset - 30min`, `dawn`, `dusk` | solar times (from `sun.sun`) |
 | `mon`…`sun`, `weekday`, `weekend` | days |

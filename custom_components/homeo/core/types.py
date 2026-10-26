@@ -38,9 +38,14 @@ def assignable(src: T, dst: T) -> bool:
 
 
 def numeric_result(op: str, a: T, b: T) -> T:
-    """The type of `a op b` for two numbers: a percentage stays one if it comes first in `*`
-    or `/` (`50% * 2`), or meets another in `+`/`-`. Anything else is a plain number."""
-    return T.PERCENT if a == T.PERCENT and (b == T.PERCENT or op in "*/") else T.NUMBER
+    """The type of `a op b` for two numbers. A product with a percentage on either side is a
+    percentage (`50% * 2`, `2 * 50%`). So is a percentage divided by anything (`50% / 2`), or
+    two percentages added or subtracted. Anything else is a plain number."""
+    if op == "*":
+        return T.PERCENT if T.PERCENT in (a, b) else T.NUMBER
+    if op == "/":
+        return T.PERCENT if a == T.PERCENT else T.NUMBER
+    return T.PERCENT if a == b == T.PERCENT else T.NUMBER
 
 
 def join(a: T, b: T) -> T | None:
