@@ -296,7 +296,7 @@ also be `unknown`. Type errors come with hints, e.g.
 
 A **custom, Python-flavoured grammar** with our own parser: a Pratt parser for expressions plus an
 indentation-aware lexer. It looks like Python (`and`/`or`/`not`, `x if c else y`, indentation)
-but adds what Python can't express: `5min`, `50%`, `22:00`, `for`, `let`, `:=`, `->` arms, `|` guards.
+but adds what Python can't express: `5min`, `50%`, `22:00`, `for`, `within`, `let`, `:=`, `->` arms, `|` guards.
 
 Rejected: strict Python syntax parsed with `ast` plus a token pre-pass. Every temporal form would
 need a pre-pass hack or turn into a function call. A hand-written parser also gives better error
@@ -526,7 +526,7 @@ climate.living.temperature :=
 
 light.hall :=
     age(manual(light.hall)) < 1h       -> keep
-    motion or age(motion) < 5min                      # a guard with sub-arms
+    motion within 5min                                # a guard with sub-arms
         | night                        -> on(brightness: 10%, kelvin: 2200)
         | else                         -> on(brightness: 100%)
     else                               -> off
@@ -599,6 +599,8 @@ let override     = age(manual(fan.bathroom)) < 1h      # changed by hand in the 
 light.hall := motion or age(motion) < 10min            # motion now, or ended < 10 min ago
 ```
 
+(The last line is common enough to have sugar: `motion within 10min`, §11.)
+
 - For timestamp signals, the change time *is* the value, so `age(remote.press)` is "time since
   the last press".
 - `age(x)` of an expression tracks when the expression's value last changed, e.g.
@@ -658,10 +660,24 @@ messages and `homeo.explain` can show the expansion.
 | Sugar | Expands to | Status |
 |---|---|---|
 | `x for D` | `x and age(x) >= D` | **Decided** |
+| `x within D` | `x or age(x) < D` | **Decided** |
 
 ```python
 light.porch := lux < 20 for 5min                 # = lux < 20 and age(lux < 20) >= 5min
+light.hall  := motion within 5min                # = motion or age(motion) < 5min
 ```
+
+`for` and `within` are duals: `x for D` is "true throughout the last D", `x within D` is "true
+at some point in the last D" (true now, or until less than D ago). So `not (x within D)` means
+`(not x) for D`; the one difference is right after Homeo loads, when `not x` is a new expression
+whose change time is only known to be "before now", so `(not x) for D` first waits D (§17
+rule 2). Both take conditions only. For a timestamp (a button, `manual()`) or a time of day,
+write the `age` comparison: `age(input_button.boost) < 30min` for "pressed in the last 30 min".
+
+Two consequences of the expansion worth knowing:
+- if `x` becomes `unavailable` after turning off, `x within D` is `unknown` once D has passed,
+  so a light it drives is left as it is until the sensor is back (D16);
+- `on x within D:` fires when `x` turns on, but not again while the window is still open.
 
 Hysteresis needs no sugar; it's a `latest` block. Each condition counts from the moment it last
 *became* true, so between 700 and 800 the fan keeps whichever state it was last switched to:
@@ -1032,12 +1048,13 @@ rule's result is definite.**
    - `age(x) < 10min`: `unknown` for the first 10 minutes, then false;
    - `x for 10min`: `unknown` for the first 10 minutes. The `for` simply waits its full duration
      again;
+   - `x within 10min`, with `x` false: `unknown` for the first 10 minutes, then false;
    - `fresh(x)`, for a bool `x` that hasn't changed since boot: `unknown`, so the arm doesn't
      fire;
    - `latest`: anything that happened after boot beats anything from before it. Two pre-restart
      occurrences can't be ordered, so the result is `unknown`.
 
-   So `light.hall := motion or age(motion) < 10min` doesn't switch the light on after a reboot.
+   So `light.hall := motion within 10min` doesn't switch the light on after a reboot.
 3. **Bindings need no restart rule of their own.** A binding's previous result isn't stored, so
    by D16 the device's current state stands in for it. As soon as a rule's result is definite,
    the device is brought in line if it doesn't already match. This means:
@@ -1120,7 +1137,7 @@ with no runtime cost. Leaving this out of v1 is fine.
 | `or` | |
 | `and` | |
 | `not` | |
-| `for` (sugar, §11) | `not motion for 5min` = `not (motion for 5min)` |
+| `for`, `within` (sugar, §11) | `not motion for 5min` = `not (motion for 5min)`; `not motion within 5min` = `not (motion within 5min)` |
 | `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`, `??` | |
 | `+`, `-` | |
 | `*`, `/` | |
@@ -1163,7 +1180,7 @@ fan.bathroom :=
     else                                -> stuffy
 
 light.bathroom :=
-    motion or age(motion) < 5min        -> on(brightness: 10% if night else 100%)
+    motion within 5min                  -> on(brightness: 10% if night else 100%)
     else                                -> off
 
 on humidity > 90% for 30min:
@@ -1187,7 +1204,7 @@ on humidity > 90% for 30min:
 | D8 | Event-type filter | **Decided** | `event.remote.double_press` |
 | D9 | Events | **Decided** | no event type: events are timestamp-valued state, as in HA |
 | D10 | Recency | **Decided** | `age(x)`: time since `x` last changed |
-| D11 | Temporal sugar | **Decided** | `x for D` = `x and age(x) >= D`; `with override`, `until`, debounce, `min_on` are "maybe later" |
+| D11 | Temporal sugar | **Decided** | `x for D` = `x and age(x) >= D`; `x within D` = `x or age(x) < D` (conditions only); `with override`, `until`, debounce, `min_on` are "maybe later" |
 | D12 | Time | **Decided** (time points provisional) | `now in 22:00..06:00` ranges; `fresh(07:00)`: a bare time is a time point |
 | D13a | State machine shape | **Decided (provisional)** | `state m = init:` + arms (TEA reducer); revisit after real use |
 | D13b | State machine semantics | **Decided** | arms are level-triggered conditions; chains with loop detection; restarts per D17 |

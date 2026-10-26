@@ -245,6 +245,30 @@ fan.bathroom := co2 > 800 and not night and day
     assert one(r, "day")["values"] == {"today": "mon"}
 
 
+def test_a_percentage_against_a_brightness_isnt_listed_as_a_value():
+    # It's a constant, as against any other percentage (found in review, when it was scaled to
+    # the brightness's 0–255 instead).
+    r = Rig("light.porch :=\n    light.hall.brightness > 50% -> on\n    else -> off\n")
+    (e,) = explain(r.rt, "light.porch")
+    assert list(e["arms"][0]["values"]) == ["light.hall.brightness"]
+
+
+def test_within_shows_its_expansion():
+    r = Rig("light.hall := binary_sensor.hall_motion within 5min\n")
+    r.h.advance(MIN)
+    r.h.set_state("binary_sensor.hall_motion", "on")
+    r.h.advance(MIN)
+    r.h.set_state("binary_sensor.hall_motion", "off")
+    r.h.advance(2 * MIN)
+    (e,) = explain(r.rt, "light.hall")
+    assert e["result"] == "on"
+    assert e["values"] == {
+        "binary_sensor.hall_motion": False,
+        "age(binary_sensor.hall_motion) < 5min": True,
+        "age(binary_sensor.hall_motion)": "2min",
+    }
+
+
 def test_value_for_hover():
     """The editor's hover asks for one name's value in one file (homeo/value)."""
     files = {

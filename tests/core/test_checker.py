@@ -1,8 +1,12 @@
+import re
+
 import pytest
 
 from custom_components.homeo.core import ir
 from custom_components.homeo.core.checker import Globals, compile_source
 from custom_components.homeo.core.errors import CompileError
+from custom_components.homeo.core.parser import parse
+from custom_components.homeo.core.printer import PREC, sexpr
 from custom_components.homeo.core.types import T
 from custom_components.homeo.core.values import KEEP
 
@@ -252,7 +256,26 @@ on sunset - 30min:
     notify.mobile_app_phone(message: "dusk")
 """,
     )
-    assert "timepoint:07:00" in p.cells and "timepoint:sunset - 30min" in p.cells
+    points = {c.text for c in p.cells.values() if isinstance(c, ir.TimePointCell)}
+    assert points == {"07:00", "sunset - 30min"}
+
+
+def test_time_points_are_keyed_by_value(host):
+    p = ok(
+        host,
+        """
+on sunset - 10min - 5min:
+    notify.mobile_app_phone(message: "a")
+on sunset - (10min - 5min):
+    notify.mobile_app_phone(message: "b")
+on sunset - 15min:
+    notify.mobile_app_phone(message: "c")
+""",
+    )
+    a, b, c = (x.trigger for x in p.actions)
+    assert a is not b and a is c
+    # printed from the value, so a shared cell reads the same whichever use created it
+    assert (a.text, b.text) == ("sunset - 15min", "sunset - 5min")
 
 
 def test_every(host):
@@ -260,12 +283,269 @@ def test_every(host):
     assert p.cells["every:900"].period == 900
 
 
+def test_within_expansion(host):
+    p = ok(host, "light.porch := binary_sensor.hall_motion within 5min")
+    e = p.bindings[0].expr
+    assert e.text == "binary_sensor.hall_motion within 5min"
+    assert isinstance(e, ir.BoolOp) and e.op == "or"
+    assert isinstance(e.right, ir.Compare) and e.right.op == "<"
+    assert e.right.text == "age(binary_sensor.hall_motion) < 5min"
+
+
+def test_not_keeps_its_parentheses_in_texts(host):
+    # `(not m) within 5min` and `not (m within 5min)` mean different things (found in review).
+    # `within` binds tighter than `not`, so the second needs no parentheses.
+    p = ok(
+        host,
+        """
+let m = binary_sensor.hall_motion
+light.hall  := ((not m) within 5min) for 1min
+light.porch := (not (m within 5min)) for 1min
+switch.pump := not (m or binary_sensor.bathroom_window)
+""",
+    )
+    hall, porch, pump = (b.expr for b in p.bindings)
+    assert hall.text == "((not binary_sensor.hall_motion) within 5min) for 1min"
+    assert porch.text == "(not binary_sensor.hall_motion within 5min) for 1min"
+    assert pump.text == "not (binary_sensor.hall_motion or binary_sensor.bathroom_window)"
+    assert hall.right.left.cell is not porch.right.left.cell
+
+
+def test_for_and_within_take_conditions(host):
+    d = err(host, "light.porch := input_button.boost for 5min")
+    assert d.message == "`input_button.boost` is a timestamp, but `for` needs a condition"
+    assert d.hint == (
+        "use `age(input_button.boost) < 5min` for 'happened in the last 5min', "
+        "or `age(input_button.boost) >= 5min` for 'hasn't happened for 5min'"
+    )
+    d = err(host, "light.porch := manual(light.porch) within 1h")
+    assert d.message == "`manual(light.porch)` is a timestamp, but `within` needs a condition"
+    assert d.hint == "use `age(manual(light.porch)) < 1h` for 'happened in the last 1h'"
+    d = err(host, "light.porch := sensor.lux within 5min")
+    assert d.message == "`within` needs a condition, but `sensor.lux` is a number"
+    d = err(host, "light.porch := binary_sensor.hall_motion within sensor.lux")
+    assert "`within` needs a fixed duration" in d.message
+    # a time of day: `age` of its last occurrence
+    d = err(host, "light.porch := sunset within 30min")
+    assert d.hint == "use `age(sunset) < 30min` for 'happened in the last 30min'"
+    # without a duration literal there's no valid suggestion to make with it
+    d = err(host, "light.porch := input_button.boost within sensor.lux")
+    assert "sensor.lux" not in (d.hint or "")
+    for src in ("within 0s", "within -5min", "for 0s"):
+        d = err(host, f"light.porch := binary_sensor.hall_motion {src}")
+        assert d.message.endswith("needs a positive duration"), src
+
+
 def test_for_expansion(host):
     p = ok(host, "light.porch := sensor.lux < 20 for 5min")
     e = p.bindings[0].expr
     assert e.text == "sensor.lux < 20 for 5min"
     assert isinstance(e, ir.BoolOp) and isinstance(e.right.left, ir.Age)
-    assert e.right.left.cell.key == "expr:sensor.lux < 20"
+    cell = e.right.left.cell
+    assert cell.text == "sensor.lux < 20" and cell.key == ir.expr_key(cell.expr)
+
+
+# The bool entities p, q, r, and blocks over them, for the history-cell tests below.
+_PQR = """
+let p = binary_sensor.hall_motion
+let q = binary_sensor.bathroom_window
+let r = binary_sensor.holiday
+let c1 =
+    p -> on
+    else -> off
+let c2 =
+    q -> on
+    else -> off
+"""
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("(p or q) ?? r", "p or (q ?? r)"),
+        ("(p if q else r) if r else q", "p if q else (r if r else q)"),
+        ("(not p) within 5min", "not (p within 5min)"),
+        ("p and (q and r)", "(p and q) and r"),
+        ("c1", "c2"),  # blocks used to print as just `cascade`
+    ],
+)
+def test_different_expressions_get_different_history_cells(host, first, second):
+    # History cells are keyed by expression structure, not text (found in review).
+    p = ok(host, _PQR + f"light.hall := ({first}) for 1min\nlight.porch := ({second}) for 1min\n")
+    hall, porch = (b.expr.right.left.cell for b in p.bindings)
+    assert hall is not porch and hall.key != porch.key
+    assert hall.text != porch.text
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("p or q", "(p) or ((q))"),
+        ("p or q", "binary_sensor.hall_motion or binary_sensor.bathroom_window"),
+        ("c1", "c1"),
+    ],
+)
+def test_the_same_expression_shares_one_history_cell(host, first, second):
+    p = ok(host, _PQR + f"light.hall := ({first}) for 1min\nlight.porch := ({second}) for 1min\n")
+    hall, porch = (b.expr.right.left.cell for b in p.bindings)
+    assert hall is porch
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "(p or q) ?? r",
+        "p or q ?? r",
+        "(p if q else r) if r else q",
+        "p if q else r if r else q",
+        "p if (q if r else p) else r",
+        "not (p or q)",
+        "(not p) within 5min",
+        "not p within 5min",
+        "(p within 5min) for 1min",
+        "p and (q and r)",
+        "(p and q) and r",
+        "sensor.lux - (sensor.outdoor_temp - 1) > 2 * (3 + sensor.lux)",
+        "-(sensor.lux + 1) < 0",
+        "(sensor.lux ?? 0) + 1 > 5",
+        "(p ?? q) == r",
+        "(sensor.lux > 5) == p",
+        "now in 22:00..06:00 or p",
+        "(p or q) in [on, off]",
+    ],
+)
+def test_texts_read_back_as_the_same_expression(host, src):
+    # A node's text parses to the same tree as its source: no missing or changed parentheses.
+    p = ok(host, _PQR + f"let x = {src}\nlight.hall := x\n")
+    text = p.bindings[0].expr.text
+    names = {"p": "binary_sensor.hall_motion", "q": "binary_sensor.bathroom_window"}
+    names["r"] = "binary_sensor.holiday"
+    want = re.sub(r"\b[pqr]\b", lambda m: names[m.group()], src)
+    assert sexpr(parse(f"let x = {text}").statements[0].value) == sexpr(
+        parse(f"let x = {want}").statements[0].value
+    ), text
+
+
+def test_history_cell_keys_dont_depend_on_inferred_types():
+    # A sensor with no unit reads as `any` while it's unavailable. That mustn't change the keys
+    # of the cells over it, or a reload at that moment would lose their history (found in
+    # review).
+    src = "switch.pump := sensor.plain > 5 within 10min\n"
+    types, keys = [], []
+    for state in ("7", "unavailable"):
+        h = standard_world()
+        h.set_state("sensor.plain", state, notify=False)
+        p = ok(h, src)
+        types.append(p.cells["state:sensor.plain"].type)
+        keys.append({k for k in p.cells if k.startswith("expr:")})
+    assert types == [T.NUMBER, T.ANY]
+    assert keys[0] and keys[0] == keys[1]
+
+
+def test_sugar_and_its_expansion_share_one_history_cell(host):
+    # `x for D` reads `x` as a condition; written out by hand, an `any` sensor stays `any`.
+    p = ok(
+        host,
+        "switch.pump := (sensor.mystery for 5min) for 1min\n"
+        "light.porch := (sensor.mystery and age(sensor.mystery) >= 5min) for 1min\n",
+    )
+    pump, porch = (b.expr.right.left.cell for b in p.bindings)
+    assert pump is porch and pump.text == "sensor.mystery for 5min"
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("sensor.lux == 2 * 3", "sensor.lux == 6"),
+        ("sensor.lux > -(5)", "sensor.lux > -5"),
+        ("now >= 22:00", "now > 22:00"),
+        ("now in sunset - 10min - 5min..23:00", "now in sunset - 15min..23:00"),
+        ("today in [sat, sun]", "today == weekend"),
+        ("today in mon..fri", "today in [mon, tue, wed, thu, fri]"),
+        ('light.hall["brightness"] > 50%', "light.hall.brightness > 50%"),
+        ("p and age(p) >= 5min", "p for 5min"),
+    ],
+)
+def test_a_shared_history_cell_prints_alike_from_either_use(host, first, second):
+    # Uses that share a cell print alike, so neither shows the other's text (found in review).
+    p = ok(host, _PQR + f"switch.pump := ({first}) for 1min\nlight.porch := ({second}) for 1min\n")
+    pump, porch = (b.expr.right.left.cell for b in p.bindings)
+    assert pump is porch
+    assert p.bindings[0].expr.text == p.bindings[1].expr.text
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "sensor.lux == 2 * 3",
+        "sensor.lux > -5 and -sensor.lux < 5",
+        "sensor.lux - -5 > 0",
+        "age(input_button.boost) > 1h + 30min",
+        "now >= sunset - 30min",
+        "now < 06:00",
+        "now not in 22:00..06:00",
+        "now in sunset - 10min..23:00 + 30min",
+        "today in mon..fri",
+        "today != sat",
+        "today not in [tue, thu]",
+        "binary_sensor.hall_motion and age(binary_sensor.hall_motion) >= 5min",
+        "binary_sensor.hall_motion or age(binary_sensor.hall_motion) < 5min",
+        "light.hall.brightness > 50%",
+        'input_select.mode in ["eco", "away"]',
+        "(sensor.lux > 5 within 1min) for 2min",
+        "binary_sensor.hall_motion == on",
+    ],
+)
+def test_texts_parse_back_to_the_same_structure(host, src):
+    p = ok(host, f"switch.pump := {src}\n")
+    e = p.bindings[0].expr
+    again = ok(host, f"switch.pump := {e.text}\n").bindings[0].expr
+    assert ir.structure(again) == ir.structure(e), e.text
+
+
+@pytest.mark.parametrize("word", ["for", "within"])
+def test_a_duration_that_divides_by_zero_is_an_error(host, word):
+    # It used to fold to an unknown constant and crash the positive-duration check (found in
+    # review). Elsewhere a constant division by zero stays as written, and is unknown.
+    d = err(host, f"light.porch := binary_sensor.hall_motion {word} 5min / 0")
+    assert d.message == f"`5min / 0` divides by zero, so `{word}` has no duration"
+    p = ok(host, "switch.pump := sensor.lux > 1 / 0")
+    assert p.bindings[0].expr.text == "sensor.lux > 1 / 0"
+
+
+def test_failed_lets_dont_share_a_history_cell(host):
+    # Each stands for its own `let`, so messages name the right one (found in review).
+    ds = errs(
+        host,
+        "let a = nosuch.x\nlet b = nosuch.y\nlight.porch := age(a) > 5min\nlight.hall := age(b)\n",
+    )
+    assert ds[-1].message == "`age(b)` is a duration, but `light.hall` needs a condition"
+
+
+def test_history_cell_keys_stay_short_when_nested(host):
+    # A cell's structure includes the keys of the cells it reads (twice in `for`/`within`).
+    src = "binary_sensor.hall_motion"
+    for _ in range(12):
+        src = f"({src}) within 1min"
+    p = ok(host, f"switch.pump := toggle({src})\n")
+    assert max(len(k) for k in p.cells) < 100
+
+
+def test_messages_leave_out_block_bodies(host):
+    src = """
+let level =
+    now in 19:00..23:00     -> 100% - 96% * (age(19:00) / 4h)
+    else                    -> 100%
+"""
+    d = err(host, src + "let x = age(level) > 1h")
+    assert d.message.startswith("`cascade{…}` changes continuously"), d.message
+
+
+def test_latest_condition_reads_bind_as_written(host):
+    p = ok(host, "switch.pump := latest\n    sunset - 30min -> on\n    sunrise -> off\n")
+    cond = p.bindings[0].expr.arms[0].cond
+    assert cond.text == "sunset - 30min" and cond.prec == PREC["-"]
+    assert p.bindings[0].text == "switch.pump := latest{sunset - 30min -> on; sunrise -> off}"
 
 
 # ----------------------------------------------------------------- bindings

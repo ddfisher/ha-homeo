@@ -51,6 +51,11 @@ def error(src):
         ('x in ["a", "b"]', '(in x ["a" "b"])'),
         ('x not in ["a"]', '(not in x ["a"])'),
         ("a and b for 2min", "(and a (for b 2min))"),
+        ("not motion within 5min", "(not (within motion 5min))"),
+        ("a or b within 2min and c", "(or a (and (within b 2min) c))"),
+        ("co2 > 800 within 5min", "(within (> co2 800) 5min)"),
+        ("a within 5min for 2min", "(for (within a 5min) 2min)"),
+        ("x.within", "x.within"),
         ("every 10min", "(every 10min)"),
         ("on(brightness: 80%, kelvin: 2700)", "(on brightness:80% kelvin:2700)"),
         ("on(brightness: 10% if night else 100%)", "(on brightness:(if night 10% 100%))"),
@@ -288,6 +293,11 @@ def test_design_examples_parse(src):
         "age(manual(fan.x)) < 1h",
         "a - (b - c)",
         "not (a for 1h30min)",
+        "humidity > 63% within 30min",
+        "not motion within 5min",
+        "(a > 5) == b",
+        "(a == b) in [on, off]",
+        "(a < b) in x..y",
     ],
 )
 def test_to_source_round_trips(src):
@@ -296,3 +306,9 @@ def test_to_source_round_trips(src):
     (s2,) = parse(f"let x = {text}").statements
     assert sexpr(s2.value) == sexpr(s.value)
     assert text == src.replace("not (a for 1h30min)", "not a for 1h30min")
+
+
+def test_within_is_a_keyword():
+    with pytest.raises(CompileError) as e:
+        parse("let within = on\n")
+    assert "keyword" in e.value.diagnostics[0].message

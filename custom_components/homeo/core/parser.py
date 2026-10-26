@@ -383,11 +383,13 @@ class Parser:
         return self.parse_for()
 
     def parse_for(self) -> A.Expr:
+        """`x for D` and `x within D` (D11): one precedence level, between `not` and
+        comparisons."""
         left = self.parse_comparison()
-        while self.check_kw("for"):
-            self.advance()
+        while self.check_kw("for", "within"):
+            sugar = A.For if self.advance().value == "for" else A.Within
             dur = self.parse_coalesce()
-            left = A.For(left.span.to(dur.span), left, dur)
+            left = sugar(left.span.to(dur.span), left, dur)
         return left
 
     def comparison_op(self) -> str | None:

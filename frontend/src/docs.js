@@ -176,6 +176,14 @@ export const DOCS = {
     text: "`x` has been true for at least `duration`. Short for `x and age(x) >= duration`.",
     example: "light.porch := lux < 20 for 5min",
   },
+  within: {
+    sig: "x within duration",
+    kind: "keyword",
+    text:
+      "`x` has been true at some point in the last `duration`: it's true now, or stopped being " +
+      "true less than `duration` ago. Short for `x or age(x) < duration`.",
+    example: "light.hall := motion within 5min",
+  },
   latest: {
     sig: "latest",
     kind: "keyword",

@@ -26,7 +26,7 @@ custom_components/homeo/
     errors.py        Diagnostic (file, line, col, message, hint) + caret formatting
     lexer.py         tokens with line/col and per-line indentation
     ast.py           dataclass AST
-    printer.py       AST back to canonical text (messages, keys)
+    printer.py       AST back to canonical text (messages, explain)
     parser.py        Pratt expressions + layout-aware statements and arm blocks
     types.py         static types
     checker.py       name resolution, type checking, target/writer checks, cycles → Program IR
@@ -138,7 +138,21 @@ The runtime builds a **cell** for each thing whose history matters:
   time points) — shared across files, keyed by what they read;
 - every `let`, state machine, binding and action header;
 - every argument of a history construct (`age`, `fresh`, `latest` conditions, `on`, `previous`,
-  `toggle`, `count`; `for` after expansion).
+  `toggle`, `count`; `for` and `within` after expansion).
+
+An argument's cell is keyed by the **structure** of its checked expression (`ir.expr_key`: a
+digest of `ir.structure`, a fully bracketed form over node kinds, operators, constants and the
+cells it reads), not by its text. Two uses share a cell exactly when they are the same expression
+after `let`s are expanded, however they're parenthesised, so different expressions can never
+share history. Inferred types aren't part of the key: they can change with an entity's state when
+the rules are checked (an `unavailable` sensor has no unit), and a reload then mustn't lose the
+cell's history. Time points are keyed by their value.
+
+Display text is printed from the checked tree (`ir.node_text`) with the parser's precedence
+table, so it always reads back as the same expression, and two uses that share a cell print
+alike: constants print from their values (`2 * 3` as `6`), `now >= 22:00` and `today in
+mon..fri` as their time range and set of days (`today == weekday`), and an expanded `for` or
+`within` as the sugar.
 
 Everything else is a pure expression evaluated inside the cell that contains it.
 
@@ -427,7 +441,7 @@ one-line `summary`, the current result, for bindings the device's state, whether
 the last write, and per arm: the arm as written (with `let` names), its condition's value
 (`happened` for `latest` arms), whether it's the active one, and `values`: every non-constant
 subexpression with its current value, `let`s labelled by name and sugar expanded (`x for D`
-lists `age(x) >= D`). Values are JSON: bools and numbers as such; durations, times and
+lists `age(x) >= D`, `x within D` lists `age(x) < D`). Values are JSON: bools and numbers as such; durations, times and
 intervals as text ("12min", "08:01:00 (12min ago)", "at least 3min" for a change time from
 before a restart). Explaining evaluates at the current time and changes no runtime state. The
 optional diagnostic sensor per binding (§19) isn't built: the service covers the need without

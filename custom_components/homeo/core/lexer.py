@@ -29,6 +29,7 @@ KEYWORDS = frozenset(
         "else",
         "in",
         "for",
+        "within",
         "keep",
         "latest",
         "every",
