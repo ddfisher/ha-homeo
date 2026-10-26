@@ -37,6 +37,12 @@ def assignable(src: T, dst: T) -> bool:
     return False
 
 
+def numeric_result(op: str, a: T, b: T) -> T:
+    """The type of `a op b` for two numbers: a percentage stays one if it comes first in `*`
+    or `/` (`50% * 2`), or meets another in `+`/`-`. Anything else is a plain number."""
+    return T.PERCENT if a == T.PERCENT and (b == T.PERCENT or op in "*/") else T.NUMBER
+
+
 def join(a: T, b: T) -> T | None:
     """The common type of two branches (ternary, cascade arms), or None if incompatible."""
     if a == b:

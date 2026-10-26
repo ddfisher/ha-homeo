@@ -18,7 +18,7 @@ from .errors import DiagnosticSink, Span, did_you_mean
 from .host import EntityCatalog, EntityState
 from .printer import fmt_duration, to_source
 from .sun import SUN_ENTITY
-from .types import NUMERIC, T, article, assignable, join
+from .types import NUMERIC, T, article, assignable, join, numeric_result
 from .values import DAY_NAMES, KEEP, UNKNOWN, DailyTime, Days, Num, parse_timestamp
 from .writers import WHOLE_ONLY, WRITERS, Writer
 
@@ -209,6 +209,7 @@ class Checker:
         self.binding_reads_via_machines: dict[str, set[tuple[str, str | None]]] = {}
         self.binding_machines: dict[str, set[str]] = {}  # target key -> machines it reads
         self._on_spans: dict[int, dict[str, Span]] = {}  # setting name spans of on(...)
+        self._arith_source: dict[int, A.Binary] = {}  # what an ir.Arith was written as
 
     # ---------------------------------------------------------------- driver
 
@@ -510,7 +511,10 @@ class Checker:
                     T.BOOL, e.span, f"{self.paren(a)} {op} {self.paren(b)}", False, op, a, b
                 )
             case A.Binary(op="+" | "-" | "*" | "/" as op, left=l, right=r):
-                return self.arith(op, self.resolve(l, ctx), self.resolve(r, ctx), e.span)
+                node = self.arith(op, self.resolve(l, ctx), self.resolve(r, ctx), e.span)
+                if isinstance(node, ir.Arith):
+                    self._arith_source[id(node)] = e
+                return node
             case A.Binary(op="??", left=l, right=r):
                 a, b = self.resolve(l, ctx), self.resolve(r, ctx)
                 t = join(a.type, b.type)
@@ -670,10 +674,7 @@ class Checker:
                 return ir.Const(T.TIMEOFDAY, span, text, False, a.value.shifted(delta))
             self.fail("a time of day can only be shifted by a fixed duration", span)
         if num(ta) and num(tb):
-            if ta == T.PERCENT and (tb == T.PERCENT or op in "*/"):
-                result = T.PERCENT
-            else:
-                result = T.NUMBER
+            result = numeric_result(op, ta, tb)
         elif ta == T.DURATION and tb == T.DURATION:
             result = T.DURATION if op in "+-" else (T.NUMBER if op == "/" else None)
         elif ta == T.DURATION and num(tb) and op in "*/":
@@ -704,6 +705,53 @@ class Checker:
             }[op]()
             return ir.Const(result, span, text, False, value)
         return ir.Arith(result, span, text, a.moving or b.moving, op, a, b)
+
+    def percent_order_hint(self, n: ir.Node) -> str | None:
+        """For a number where a percentage is wanted: a hint if it's a number only because of
+        `number * percentage` products (a percentage stays one only when it comes first), and
+        putting the percentages first would make it a percentage. Quotes each product as
+        written (`let` names, not inlined), with the products inside it swapped too."""
+        numeric = NUMERIC | {T.ANY}
+        swapped: dict[int, A.Binary] = {}  # AST id -> product to swap
+
+        def retype(x: ir.Node) -> T:
+            if isinstance(x, ir.Neg):
+                return retype(x.operand)
+            if isinstance(x, ir.Arith) and x.left.type in numeric and x.right.type in numeric:
+                a, b = retype(x.left), retype(x.right)
+                if x.op == "*" and a in (T.NUMBER, T.ANY) and b == T.PERCENT:
+                    e = self._arith_source[id(x)]
+                    swapped[id(e)] = e
+                    a, b = b, a
+                return numeric_result(x.op, a, b)
+            return x.type
+
+        if retype(n) != T.PERCENT or not swapped:
+            return None
+
+        inner: set[int] = set()  # swapped products written inside another one
+
+        def fixed(e: A.Expr, top: bool = True) -> A.Expr:
+            if isinstance(e, A.Unary) and e.op == "-":
+                return A.Unary(e.span, e.op, fixed(e.operand, False))
+            if isinstance(e, A.Binary) and e.op in ("+", "-", "*", "/"):
+                left, right = fixed(e.left, False), fixed(e.right, False)
+                if id(e) in swapped:
+                    if not top:
+                        inner.add(id(e))
+                    return A.Binary(e.span, "*", right, left)
+                return A.Binary(e.span, e.op, left, right)
+            return e
+
+        rewrites = [(e, fixed(e)) for e in swapped.values()]
+        outer = sorted(
+            ((e, f) for e, f in rewrites if id(e) not in inner),
+            key=lambda ef: (ef[0].span.line, ef[0].span.col),
+        )
+        written = " and ".join(f"`{to_source(e)}`" for e, _ in outer)
+        fixes = " and ".join(f"`{to_source(f)}`" for _, f in outer)
+        what = "is a number, not a percentage" if len(outer) == 1 else "are numbers"
+        return f"{written} {what}: a percentage stays one only when it comes first. Write {fixes}"
 
     @staticmethod
     def paren_arith(n: ir.Node) -> str:
@@ -1228,8 +1276,11 @@ class Checker:
         if T.BOOL in writer.accepts and r.type in (T.TIMESTAMP, T.TIMEOFDAY, T.DURATION):
             self.want_bool(r, f"`{key}`")
         if not any(assignable(r.type, t) for t in writer.accepts):
+            hint = self.percent_order_hint(r) if T.PERCENT in writer.accepts else None
             self.fail(
-                f"`{key}` takes {writer.description}, but `{r.text}` is {article(r.type)}", r.span
+                f"`{key}` takes {writer.description}, but `{r.text}` is {article(r.type)}",
+                r.span,
+                hint,
             )
         if isinstance(r, ir.OnValue):
             spans = self._on_spans.get(id(r), {})
@@ -1247,7 +1298,11 @@ class Checker:
                     if leaf.type == T.ANY:
                         continue
                     if p.type == T.PERCENT and leaf.type != T.PERCENT:
-                        self.fail(f"`{name}` takes a percentage, e.g. `{name}: 50%`", leaf.span)
+                        self.fail(
+                            f"`{name}` takes a percentage, e.g. `{name}: 50%`",
+                            leaf.span,
+                            self.percent_order_hint(leaf),
+                        )
                     if p.type == T.NUMBER and leaf.type not in NUMERIC:
                         self.fail(f"`{name}` takes a number", leaf.span)
         if isinstance(r, ir.Const) and r.type == T.STRING:

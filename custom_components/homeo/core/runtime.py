@@ -58,6 +58,7 @@ from .values import (
     parse_timestamp,
     same_line,
     same_value,
+    side,
     snapshot,
 )
 
@@ -954,18 +955,18 @@ class Runtime:
             return n
         lo, hi = bounds
         x, r = n.lo, n.rlo
-        if x < lo or (x == lo and r < 0):
-            if r > 0:
-                self._wake_at(self.now + (lo - x) / r)
+        below, back = side(x, r, lo, self.now)
+        above, down = side(x, r, hi, self.now)
+        if below < 0:
+            self._wake_at(back)
             return Num.of(lo)
-        if x > hi or (x == hi and r > 0):
-            if r < 0:
-                self._wake_at(self.now + (x - hi) / -r)
+        if above > 0:
+            self._wake_at(down)
             return Num.of(hi)
-        if r > 0:
-            self._wake_at(self.now + (hi - x) / r)
-        elif r < 0:
-            self._wake_at(self.now + (x - lo) / -r)
+        self._wake_at(min(back, down))
+        if not lo <= x <= hi:  # on a bound by the clock, a hair off it by rounding
+            x = min(max(x, lo), hi)
+            n = Num(x, x, r, r)
         return n
 
     def _horizon(self, s: RSink) -> float:
