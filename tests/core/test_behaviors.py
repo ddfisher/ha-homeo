@@ -379,6 +379,40 @@ light.hall :=
     assert r.new_calls() == []
 
 
+def brightnesses(calls: list[str]) -> list[float]:
+    return [float(c.split("brightness_pct=")[1].split()[0]) for c in calls]
+
+
+def test_clamp_holds_when_rounding_leaves_the_line_a_hair_from_the_bound():
+    # Over 3h the line reaches 0% a hair late (1e-14%): its wake-up is a rounding error from
+    # now, so it used to be lost and the next piece went on to -2.67%.
+    r = Rig("light.hall := on(brightness: 7% - 96% * (age(19:00) / 3h))", host=world())
+    at(r, 19, 30)
+    calls = r.new_calls()
+    assert calls[-1] == "light.turn_on light.hall brightness_pct=0 transition=187.5"
+    assert min(brightnesses(calls)) == 0
+    at(r, 23)
+    assert r.new_calls() == []
+
+
+def test_rising_line_leaves_the_lower_bound_and_stops_at_the_upper():
+    # Starting below 0%, the line used to stay at 0% (its wake-up lost) all evening.
+    r = Rig("light.hall := on(brightness: 96% * (age(19:00) / 3h) - 7%)", host=world())
+    at(r, 19)
+    r.new_calls()
+    at(r, 19, 20)
+    assert r.new_calls() == [
+        "light.turn_on light.hall brightness_pct=2.67 transition=300",
+        "light.turn_on light.hall brightness_pct=5.33 transition=300",
+    ]
+    # ... and reaches 100% without going past it (it used to send 102.67%).
+    r2 = Rig("light.hall := on(brightness: 96% * (age(19:00) / 3h) - 3%)", host=world())
+    at(r2, 23)
+    calls = r2.new_calls()
+    assert calls[-1] == "light.turn_on light.hall brightness_pct=100 transition=150"
+    assert max(brightnesses(calls)) == 100
+
+
 def test_numbers_are_clamped_to_min_and_max():
     h = world(**{"input_number.target": ("50", {"min": 0, "max": 60, "step": 1})})
     r = Rig("input_number.target := 50 + age(19:00) / 1min", host=h)
