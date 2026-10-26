@@ -36,6 +36,13 @@ def explain(rt: Runtime, query: str) -> list[dict[str, Any]]:
     return _Explainer(rt).explain(query.strip())
 
 
+def value(rt: Runtime, file: str, name: str) -> dict[str, Any]:
+    """The current value of a `let` or `state` name in `file`'s running version, for the
+    editor's hover: the value as text, its type, and when it last changed where that's known.
+    Raises NotFound."""
+    return _Explainer(rt).value(file, name.strip())
+
+
 class _Explainer:
     def __init__(self, rt: Runtime):
         self.rt = rt
@@ -67,6 +74,32 @@ class _Explainer:
         if not out:
             raise NotFound(self.not_found(query))
         return out
+
+    def value(self, file: str, name: str) -> dict[str, Any]:
+        program = self.rt.programs.get(file)
+        with self._evaluating():
+            node = program.lets.get(name) if program is not None else None
+            if node is not None:
+                out: dict[str, Any] = {
+                    "kind": "let",
+                    "type": str(node.type),
+                    "value": self.fmt_plain(self.eval(node), node.type),
+                }
+                if isinstance(node, ir.Read) and (rc := self.rt.cells.get(node.cell.key)):
+                    out["changed"] = self.fmt_since(rc.ct)  # an alias: when the entity changed
+                return out
+            m = self.rt.machines.get(name)
+            if m is not None and m.defn.file == file:
+                return {
+                    "kind": "state",
+                    "type": str(T.STRING),
+                    "value": self.fmt_plain(m.value, T.STRING),
+                    "changed": self.fmt_since(m.ct),
+                    "entity": MACHINE_ENTITY_PREFIX + name,
+                }
+        if program is None:
+            raise NotFound(f"{file} isn't running")
+        raise NotFound(f"no `let` or `state` named `{name}` in the running version of {file}")
 
     def not_found(self, query: str) -> str:
         names = {s.defn.key for s in self.rt.sinks if isinstance(s.defn, ir.BindingDef)}

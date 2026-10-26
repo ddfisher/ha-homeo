@@ -1,9 +1,10 @@
 // Autocompletion: entity ids (from the live HA states), their attributes and event types,
 // services and their fields (in `on` action bodies), `on(...)` settings, keywords, builtins,
-// and the file's own `let` and `state` names.
+// and the file's own `let` and `state` names. Builtins and keywords show their docs (docs.js).
 
 import { startCompletion } from "@codemirror/autocomplete";
 
+import { DOCS, docText } from "./docs.js";
 import { BUILTINS, FUNCTIONS, KEYWORDS } from "./language.js";
 
 /** The settings `on(...)` takes, per bound domain. Mirrors the writers' `on_params`
@@ -29,11 +30,15 @@ function applyDomain(domain) {
   };
 }
 
+/** Builtins and keywords with their hover docs as completion info. */
+const withDocs = (option) =>
+  Object.hasOwn(DOCS, option.label) ? { ...option, info: docText(DOCS[option.label]) } : option;
+
 const STATIC = [
   ...KEYWORDS.map((label) => ({ label, type: "keyword" })),
   ...BUILTINS.map((label) => ({ label, type: "constant" })),
   ...FUNCTIONS.map((label) => ({ label, type: "function", apply: `${label}(` })),
-];
+].map(withDocs);
 
 function localNames(doc) {
   const out = new Set();
@@ -42,8 +47,8 @@ function localNames(doc) {
 }
 
 /** `let` names that are plain aliases of an entity: `let remote = event.bathroom_remote`. */
-function aliases(doc) {
-  const out = {};
+export function aliases(doc) {
+  const out = Object.create(null); // keyed by names from the file: no `constructor` etc.
   for (const m of doc.matchAll(/^let\s+([A-Za-z_]\w*)\s*=\s*([a-z_]\w*\.\w+)\s*(?:#.*)?$/gm)) {
     out[m[1]] = m[2];
   }
@@ -139,7 +144,7 @@ function text40(s) {
 /** Argument names for a call to `callee`: `on(...)` settings, builtin function arguments
  * (after the positional first one), or a service's data fields (`notify.phone(` or
  * `light.hall.turn_on(`, aliases resolved). */
-function argumentOptions({ callee, index }, statement, services, alias) {
+export function argumentOptions({ callee, index }, statement, services, alias) {
   if (callee === "on") {
     const domain = boundDomain(statement);
     const table = ON_SETTINGS[domain] ? { [domain]: ON_SETTINGS[domain] } : ON_SETTINGS;

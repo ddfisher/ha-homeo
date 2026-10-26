@@ -1,4 +1,5 @@
-"""Websocket API for the editor panel (§19): list, read, check, save and delete rule files.
+"""Websocket API for the editor panel (§19): list, read, check, save and delete rule files,
+explain rules, and look up values for hovers.
 
 All commands need an admin user: rule files drive devices.
 """
@@ -14,7 +15,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .const import DOMAIN, RULES_SUFFIX, SIGNAL_FILES_CHANGED
 from .core.errors import Diagnostic
-from .core.explain import NotFound, explain
+from .core.explain import NotFound, explain, value
 from .manager import file_version
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ def async_register(hass: HomeAssistant) -> None:
         ws_save,
         ws_delete,
         ws_explain,
+        ws_value,
     ):
         websocket_api.async_register_command(hass, command)
 
@@ -214,3 +216,25 @@ def ws_explain(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> Non
         connection.send_error(msg["id"], "not_found", str(err))
         return
     connection.send_result(msg["id"], {"explanations": result})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "homeo/value",
+        vol.Required("name"): _file_name,
+        vol.Required("symbol"): str,
+    }
+)
+@websocket_api.require_admin
+@callback
+def ws_value(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
+    """The current value of a `let` or `state` name in a file's running version, for the
+    editor's hover (lighter than homeo/explain, and limited to that file's names)."""
+    if (manager := _manager(hass, connection, msg)) is None:
+        return
+    try:
+        result = value(manager.runtime, msg["name"], msg["symbol"])
+    except NotFound as err:
+        connection.send_error(msg["id"], "not_found", str(err))
+        return
+    connection.send_result(msg["id"], result)

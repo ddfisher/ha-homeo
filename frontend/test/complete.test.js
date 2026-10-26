@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { CompletionContext } from "@codemirror/autocomplete";
 import { EditorState } from "@codemirror/state";
 
-import { callContext, homeoCompletions, inActionBody } from "../src/complete.js";
+import { aliases, callContext, homeoCompletions, inActionBody } from "../src/complete.js";
 
 const hass = {
   states: {
@@ -118,4 +118,11 @@ test("call context and action bodies", () => {
   assert.equal(inActionBody("on bus.zha_event(command: 1)"), false);
   assert.equal(inActionBody("on bus.zha_event(command: 1):\n    "), true);
   assert.equal(inActionBody("light.hall := on"), false);
+});
+
+test("aliases never match object prototype keys", () => {
+  const a = aliases("let x = sensor.co2\n");
+  assert.equal(a.x, "sensor.co2");
+  assert.equal(a.constructor, undefined);
+  assert.equal(a.__proto__, undefined);
 });

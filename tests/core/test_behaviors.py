@@ -1,6 +1,7 @@
 """Behaviors: binding results that move with the clock (D23)."""
 
 from custom_components.homeo.core.explain import explain
+from custom_components.homeo.core.values import INF, Num
 
 from .fakehost import standard_world
 from .rig import Rig
@@ -377,6 +378,62 @@ light.hall :=
     assert r.new_calls()[-1] == "light.turn_on light.hall brightness_pct=0 transition=150"
     at(r, 22)
     assert r.new_calls() == []
+
+
+def brightnesses(calls: list[str]) -> list[float]:
+    return [float(c.split("brightness_pct=")[1].split()[0]) for c in calls]
+
+
+def test_clamp_holds_when_rounding_leaves_the_line_a_hair_from_the_bound():
+    # Over 3h the line reaches 0% a hair late (1e-14%): its wake-up is a rounding error from
+    # now, so it used to be lost and the next piece went on to -2.67%.
+    r = Rig("light.hall := on(brightness: 7% - 96% * (age(19:00) / 3h))", host=world())
+    at(r, 19, 30)
+    calls = r.new_calls()
+    assert calls[-1] == "light.turn_on light.hall brightness_pct=0 transition=187.5"
+    assert min(brightnesses(calls)) == 0
+    at(r, 23)
+    assert r.new_calls() == []
+
+
+def test_clamp_counts_a_bound_reached_within_a_clock_tick():
+    rt = Rig("", host=world()).rt
+    # 5e-10% above 0% and falling: it reaches 0% in 5.6e-8 s, which rounds to now.
+    rt._cur_wake = INF
+    assert rt._clamp(Num(5e-10, 5e-10, -0.009, -0.009), (0, 100)) == Num.of(0)
+    assert rt._cur_wake == INF  # constant from here: nothing to wake up for
+    # 5e-10% below 0% and rising: in range now, so not left a hair below it.
+    rt._cur_wake = INF
+    assert rt._clamp(Num(-5e-10, -5e-10, 0.009, 0.009), (0, 100)) == Num(0, 0, 0.009, 0.009)
+    assert rt._cur_wake == rt.now + 100 / 0.009  # when it reaches 100%
+
+
+def test_comparison_flips_when_rounding_leaves_it_a_hair_short():
+    # The difference reaches 0 at 19:01:49 a hair short; the wake-up for the rest of the way
+    # used to round to now and be lost, so the pump never turned on.
+    r = Rig("switch.pump := (1% - 33% * (age(19:00) / 1h)) < 0%", host=world())
+    at(r, 19)
+    r.new_calls()
+    at(r, 19, 1, 50)
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+
+
+def test_rising_line_leaves_the_lower_bound_and_stops_at_the_upper():
+    # Starting below 0%, the line used to stay at 0% (its wake-up lost) all evening.
+    r = Rig("light.hall := on(brightness: 96% * (age(19:00) / 3h) - 7%)", host=world())
+    at(r, 19)
+    r.new_calls()
+    at(r, 19, 20)
+    assert r.new_calls() == [
+        "light.turn_on light.hall brightness_pct=2.67 transition=300",
+        "light.turn_on light.hall brightness_pct=5.33 transition=300",
+    ]
+    # ... and reaches 100% without going past it (it used to send 102.67%).
+    r2 = Rig("light.hall := on(brightness: 96% * (age(19:00) / 3h) - 3%)", host=world())
+    at(r2, 23)
+    calls = r2.new_calls()
+    assert calls[-1] == "light.turn_on light.hall brightness_pct=100 transition=150"
+    assert max(brightnesses(calls)) == 100
 
 
 def test_numbers_are_clamped_to_min_and_max():
