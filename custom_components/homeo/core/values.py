@@ -129,7 +129,8 @@ def num_div(a: Num, b: Num) -> Num | _Unknown:
 
 def side(v: float, r: float, target: float, now: float) -> tuple[int, float]:
     """Where a line at `v`, moving at `r`, is just after `now` relative to `target` (-1 below,
-    0 on it, 1 above), and the instant that next changes.
+    0 on it, 1 above), and the instant that next changes. Only a line that isn't moving can be
+    on it: a moving one is already past `target` just after the instant it gets there.
 
     Both answers come from one reading of the clock: the line reaches `target` at
     `now + (target - v) / r`, and if that instant is not after `now`, it is there. So rounding
