@@ -68,8 +68,8 @@ export const homeoStream = {
       if (CONTROL.has(word)) return "keyword";
       if (ATOMS.has(word)) return "atom";
       // A dotted name: an entity id (`sensor.co2`), maybe with an attribute or event type.
-      if (stream.peek() === ".") {
-        stream.match(/^(?:\.[A-Za-z0-9_]+)+/);
+      // (`mon..fri` and `sunset..23:00` are ranges, not dotted names)
+      if (stream.peek() === "." && stream.match(/^(?:\.[A-Za-z0-9_]+)+/)) {
         return lineStart && /^\s*:=/.test(stream.string.slice(stream.pos)) ? "target" : "entity";
       }
       if (FUNCTION_SET.has(word) && stream.peek() === "(") return "builtinFunction";

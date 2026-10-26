@@ -193,3 +193,20 @@ test("explanation html: code may wrap after an opening bracket", () => {
   const html = explanationHtml({ let: "v", file: "f", value: 1, values: { "age(manual(fan.x)) + f()": 1 } });
   assert.ok(html.includes("age(<wbr>manual(<wbr>fan.x)) + f()"));
 });
+
+test("a range bound before `..` isn't an entity", () => {
+  assert.deepEqual(tokens("let w = today in mon..fri"), [
+    ["let", "keyword"],
+    ["w", "def"],
+    ["=", "operator"],
+    ["today", "builtin"],
+    ["in", "keyword"],
+    ["mon", "builtin"],
+    ["..", "operator"],
+    ["fri", "builtin"],
+  ]);
+  assert.deepEqual(tokens("let e = now in sunset..23:00").slice(5, 7), [
+    ["sunset", "builtin"],
+    ["..", "operator"],
+  ]);
+});

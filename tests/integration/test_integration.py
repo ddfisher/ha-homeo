@@ -544,6 +544,12 @@ async def test_editor_websocket_api(hass: HomeAssistant, setup_homeo, rules_dir,
     r = await ws({"type": "homeo/explain", "target": "switch.pump"})
     assert r["result"]["explanations"][0]["binding"] == "switch.pump"  # the old version runs
 
+    # value: a `let` or `state` name's current value, for the editor's hover
+    r = await ws({"type": "homeo/value", "name": "broken.homeo", "symbol": "x"})
+    assert r["result"] == {"kind": "let", "type": "bool", "value": "true"}
+    r = await ws({"type": "homeo/value", "name": "pump.homeo", "symbol": "x"})
+    assert not r["success"] and r["error"]["code"] == "not_found"
+
     r = await ws({"type": "homeo/file/delete", "name": "broken.homeo"})
     assert r["success"]
     assert not (rules_dir / "broken.homeo").exists()
