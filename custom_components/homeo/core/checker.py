@@ -536,7 +536,9 @@ class Checker:
                 t = join(a.type, b.type)
                 if t is None:
                     self.fail(
-                        f"`??` needs both sides of the same type ({a.type} vs {b.type})", e.span
+                        f"`??` needs both sides of the same type ({a.type} vs {b.type})",
+                        e.span,
+                        self.mix_hint(a, b),
                     )
                 return ir.Coalesce(t, e.span, f"{a.text} ?? {b.text}", a.moving or b.moving, a, b)
             case A.Binary(op="in" | "not in" as op, left=l, right=r):
@@ -553,7 +555,9 @@ class Checker:
                 ty = join(a.type, b.type)
                 if ty is None:
                     self.fail(
-                        f"both branches must have the same type ({a.type} vs {b.type})", e.span
+                        f"both branches must have the same type ({a.type} vs {b.type})",
+                        e.span,
+                        self.mix_hint(a, b),
                     )
                 return ir.IfElse(
                     ty,
@@ -833,6 +837,11 @@ class Checker:
                 return f"`{x.text}` is on/off: write `{x.text}` or `not {x.text}`, or compare with `{y.value}` without quotes"
             if x.type == T.TIMESTAMP and y.type == T.DURATION:
                 return f"did you mean `age({x.text})`?"
+        return self.mix_hint(a, b)
+
+    def mix_hint(self, a: ir.Node, b: ir.Node) -> str | None:
+        """For a number and a percentage that must have the same type: fix the number."""
+        for x, y in ((a, b), (b, a)):
             if x.type == T.PERCENT and y.type == T.NUMBER:
                 return self.as_percent_hint(y)
         return None
@@ -1088,10 +1097,14 @@ class Checker:
 
     def join_results(self, arms: list[ir.ArmIR | ir.GroupIR], span: Span) -> T:
         t: T = T.KEEP
+        seen: list[ir.Node] = []
         for r in self.results(arms):
             j = join(t, r.type)
             if j is None:
-                self.fail(f"arms have different types ({t} and {r.type})", r.span)
+                other = next((x for x in seen if join(x.type, r.type) is None), None)
+                hint = self.mix_hint(r, other) if other is not None else None
+                self.fail(f"arms have different types ({t} and {r.type})", r.span, hint)
+            seen.append(r)
             t = j
         return t
 

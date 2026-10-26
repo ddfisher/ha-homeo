@@ -372,6 +372,26 @@ def test_a_percentage_is_not_a_number_or_the_other_way_round(host):
     assert "number" in d.message and "percentage" in d.message
 
 
+def test_mixing_a_number_and_a_percentage_hints_at_the_number(host):
+    d = err(host, "let x = sensor.bathroom_humidity ?? 50")
+    assert "`??` needs both sides" in d.message and d.hint == "write `50%`"
+    d = err(host, "let x = 10 if sensor.lux > 5 else 10%")
+    assert "both branches" in d.message and d.hint == "write `10%`"
+    src = """
+cover.blinds.position :=
+    binary_sensor.bathroom_window -> 30
+    else                          -> 100%
+"""
+    d = err(host, src)
+    assert "arms have different types" in d.message and d.hint == "write `30%`"
+    src = """
+cover.blinds.position :=
+    binary_sensor.bathroom_window -> 30%
+    else                          -> sensor.lux
+"""
+    assert "measured in" in err(host, src).hint
+
+
 def test_percent_sensors_and_attributes_are_percentages(host):
     for read in (
         "sensor.bathroom_humidity",
