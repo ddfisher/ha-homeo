@@ -9,8 +9,8 @@ Comparisons of `Num`s are three-valued (definite only if the whole interval is o
 report the instant at which their result could next change, so the runtime can schedule a
 wake-up instead of polling. Comparisons are evaluated "just after" the evaluation instant
 (right limit), so at the exact crossing time of a moving value the comparison already shows its
-new result and no epsilon wake-ups are needed. Rounding can leave a value a hair short of a
-crossing at that instant; `snap` counts it as there.
+new result and no epsilon wake-ups are needed. Whether a line has reached a crossing is decided
+on the clock, by `side`, so rounding can't leave it a hair short with its wake-up lost.
 """
 
 from __future__ import annotations
@@ -127,42 +127,29 @@ def num_div(a: Num, b: Num) -> Num | _Unknown:
     return Num(min(corners), max(corners))
 
 
-def snap(v: float, r: float, target: float, now: float) -> float:
-    """`v` (moving at rate `r`), or `target` if it gets there too soon after (or before) `now`
-    for the clock to tell apart. At the instant a line reaches a crossing or a bound, rounding
-    can leave it a hair away; a wake-up for the rest of the way would round to `now` and be
-    lost, so the line would never get there."""
-    if r and math.isfinite(v) and now + (target - v) / r == now:
-        return target
-    return v
+def side(v: float, r: float, target: float, now: float) -> tuple[int, float]:
+    """Where a line at `v`, moving at `r`, is just after `now` relative to `target` (-1 below,
+    0 on it, 1 above), and the instant that next changes.
 
-
-def _sign_after(v: float, r: float) -> int:
-    """Sign of a bound just after now (right limit)."""
+    Both answers come from one reading of the clock: the line reaches `target` at
+    `now + (target - v) / r`, and if that instant is not after `now`, it is there. So rounding
+    can't leave a crossing in between, a hair away with a wake-up that rounds to `now`."""
     if math.isnan(v):
-        return 0
-    if v > 0:
-        return 1
-    if v < 0:
-        return -1
-    return 1 if r > 0 else (-1 if r < 0 else 0)
-
-
-def _crossing(v: float, r: float, now: float) -> float:
-    """When a bound with value v and rate r next changes sign (strictly after now)."""
-    if r == 0 or math.isinf(v) or math.isnan(v):
-        return INF
-    t = -v / r
-    return now + t if t > 0 else INF
+        return 0, INF
+    if r == 0 or math.isinf(v):
+        return (v > target) - (v < target), INF
+    t = now + (target - v) / r
+    if t <= now:  # reached or receding: the side it moves to, for good
+        return (1 if r > 0 else -1), INF
+    return (1 if v > target else -1), t
 
 
 def compare(op: str, a: Num, b: Num, now: float) -> tuple[bool | _Unknown, float]:
     """Three-valued comparison of `a op b`, and the next instant its result may change."""
     d = a - b
-    dlo, dhi = snap(d.lo, d.rlo, 0.0, now), snap(d.hi, d.rhi, 0.0, now)
-    lo = _sign_after(dlo, d.rlo)  # sign of the smallest possible a - b
-    hi = _sign_after(dhi, d.rhi)  # sign of the largest possible a - b
-    wake = min(_crossing(dlo, d.rlo, now), _crossing(dhi, d.rhi, now))
+    lo, wake_lo = side(d.lo, d.rlo, 0.0, now)  # sign of the smallest possible a - b
+    hi, wake_hi = side(d.hi, d.rhi, 0.0, now)  # sign of the largest possible a - b
+    wake = min(wake_lo, wake_hi)
     if op == "<":
         result = True if hi < 0 else False if lo >= 0 else UNKNOWN
     elif op == "<=":

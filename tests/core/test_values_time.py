@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from custom_components.homeo.core import timeutil
-from custom_components.homeo.core.values import INF, UNKNOWN, DailyTime, Num, compare, snap
+from custom_components.homeo.core.values import INF, UNKNOWN, DailyTime, Num, compare, side
 
 CORE = Path(__file__).parents[2] / "custom_components" / "homeo" / "core"
 
@@ -62,12 +62,13 @@ def test_moving_comparison_reports_crossing():
 NOW = 1.77e9  # a 2026 timestamp: one clock tick is about 2.4e-7 s
 
 
-def test_snap_counts_a_crossing_within_a_clock_tick_as_reached():
-    assert snap(5e-10, -0.009, 0.0, NOW) == 0.0  # 5.6e-8 s to go: rounds to now
-    assert snap(-5e-10, -0.009, 0.0, NOW) == 0.0  # 5.6e-8 s ago
-    assert snap(5e-6, -0.009, 0.0, NOW) == 5e-6  # 0.6 ms to go: the clock can tell
-    assert snap(5e-10, 0.0, 0.0, NOW) == 5e-10  # not moving
-    assert snap(INF, -1.0, 0.0, NOW) == INF
+def test_side_counts_a_crossing_within_a_clock_tick_as_reached():
+    assert side(5e-10, -0.009, 0.0, NOW) == (-1, INF)  # 5.6e-8 s to go: rounds to now
+    assert side(-5e-10, -0.009, 0.0, NOW) == (-1, INF)  # 5.6e-8 s ago
+    assert side(5e-6, -0.009, 0.0, NOW) == (1, NOW + 5e-6 / 0.009)  # the clock can tell
+    assert side(5e-10, 0.0, 0.0, NOW) == (1, INF)  # not moving
+    assert side(-5e-10, 0.009, 0.0, NOW) == (1, INF)  # rising, reached within a tick
+    assert side(INF, -1.0, 0.0, NOW) == (1, INF)
 
 
 def test_comparison_a_hair_short_of_its_crossing_has_crossed():
