@@ -6,7 +6,7 @@ from custom_components.homeo.core import ir
 from custom_components.homeo.core.checker import Globals, compile_source
 from custom_components.homeo.core.errors import CompileError
 from custom_components.homeo.core.parser import parse
-from custom_components.homeo.core.printer import sexpr
+from custom_components.homeo.core.printer import PREC, sexpr
 from custom_components.homeo.core.types import T
 from custom_components.homeo.core.values import KEEP
 
@@ -117,7 +117,9 @@ let raw = event.bathroom_remote["event_type"] == "press"
 def test_percent_against_brightness_is_scaled(host):
     p = ok(host, "let b = light.hall.brightness > 50%\nlight.porch := b\n")
     cmp = p.bindings[0].expr
-    assert cmp.right.value.lo == pytest.approx(127.5)
+    assert isinstance(cmp.right, ir.Scale) and cmp.right.factor == pytest.approx(2.55)
+    assert cmp.right.operand.value.lo == 50
+    assert cmp.text == "light.hall.brightness > 50%"  # shown as written
 
 
 def test_unknown_event_type(host):
@@ -262,8 +264,9 @@ on sunset - 15min:
 """,
     )
     a, b, c = (x.trigger for x in p.actions)
-    assert (a.text, b.text) == ("sunset - 10min - 5min", "sunset - (10min - 5min)")
     assert a is not b and a is c
+    # printed from the value, so a shared cell reads the same whichever use created it
+    assert (a.text, b.text) == ("sunset - 15min", "sunset - 5min")
 
 
 def test_every(host):
@@ -330,7 +333,7 @@ def test_for_expansion(host):
     assert e.text == "sensor.lux < 20 for 5min"
     assert isinstance(e, ir.BoolOp) and isinstance(e.right.left, ir.Age)
     cell = e.right.left.cell
-    assert cell.text == "sensor.lux < 20" and cell.key == f"expr:{ir.structure(cell.expr)}"
+    assert cell.text == "sensor.lux < 20" and cell.key == ir.expr_key(cell.expr)
 
 
 # The bool entities p, q, r, and blocks over them, for the history-cell tests below.
@@ -412,6 +415,109 @@ def test_texts_read_back_as_the_same_expression(host, src):
     assert sexpr(parse(f"let x = {text}").statements[0].value) == sexpr(
         parse(f"let x = {want}").statements[0].value
     ), text
+
+
+def test_history_cell_keys_dont_depend_on_inferred_types():
+    # A sensor with no unit reads as `any` while it's unavailable. That mustn't change the keys
+    # of the cells over it, or a reload at that moment would lose their history (found in
+    # review).
+    src = "switch.pump := sensor.plain > 5 within 10min\n"
+    types, keys = [], []
+    for state in ("7", "unavailable"):
+        h = standard_world()
+        h.set_state("sensor.plain", state, notify=False)
+        p = ok(h, src)
+        types.append(p.cells["state:sensor.plain"].type)
+        keys.append({k for k in p.cells if k.startswith("expr:")})
+    assert types == [T.NUMBER, T.ANY]
+    assert keys[0] and keys[0] == keys[1]
+
+
+def test_sugar_and_its_expansion_share_one_history_cell(host):
+    # `x for D` reads `x` as a condition; written out by hand, an `any` sensor stays `any`.
+    p = ok(
+        host,
+        "switch.pump := (sensor.mystery for 5min) for 1min\n"
+        "light.porch := (sensor.mystery and age(sensor.mystery) >= 5min) for 1min\n",
+    )
+    pump, porch = (b.expr.right.left.cell for b in p.bindings)
+    assert pump is porch and pump.text == "sensor.mystery for 5min"
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("sensor.lux == 2 * 3", "sensor.lux == 6"),
+        ("sensor.lux > -(5)", "sensor.lux > -5"),
+        ("now >= 22:00", "now > 22:00"),
+        ("now in sunset - 10min - 5min..23:00", "now in sunset - 15min..23:00"),
+        ("today in [sat, sun]", "today == weekend"),
+        ("today in mon..fri", "today in [mon, tue, wed, thu, fri]"),
+        ('light.hall["brightness"] > 50', "light.hall.brightness > 50"),
+        ("p and age(p) >= 5min", "p for 5min"),
+    ],
+)
+def test_a_shared_history_cell_prints_alike_from_either_use(host, first, second):
+    # Uses that share a cell print alike, so neither shows the other's text (found in review).
+    p = ok(host, _PQR + f"switch.pump := ({first}) for 1min\nlight.porch := ({second}) for 1min\n")
+    pump, porch = (b.expr.right.left.cell for b in p.bindings)
+    assert pump is porch
+    assert p.bindings[0].expr.text == p.bindings[1].expr.text
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "sensor.lux == 2 * 3",
+        "sensor.lux > -5 and -sensor.lux < 5",
+        "sensor.lux - -5 > 0",
+        "age(input_button.boost) > 1h + 30min",
+        "now >= sunset - 30min",
+        "now < 06:00",
+        "now not in 22:00..06:00",
+        "now in sunset - 10min..23:00 + 30min",
+        "today in mon..fri",
+        "today != sat",
+        "today not in [tue, thu]",
+        "binary_sensor.hall_motion and age(binary_sensor.hall_motion) >= 5min",
+        "binary_sensor.hall_motion or age(binary_sensor.hall_motion) < 5min",
+        "light.hall.brightness > 50%",
+        'input_select.mode in ["eco", "away"]',
+        "(sensor.lux > 5 within 1min) for 2min",
+        "binary_sensor.hall_motion == on",
+    ],
+)
+def test_texts_parse_back_to_the_same_structure(host, src):
+    p = ok(host, f"switch.pump := {src}\n")
+    e = p.bindings[0].expr
+    again = ok(host, f"switch.pump := {e.text}\n").bindings[0].expr
+    assert ir.structure(again) == ir.structure(e), e.text
+
+
+def test_history_cell_keys_stay_short_when_nested(host):
+    # A cell's structure includes the keys of the cells it reads (twice in `for`/`within`).
+    src = "binary_sensor.hall_motion"
+    for _ in range(12):
+        src = f"({src}) within 1min"
+    p = ok(host, f"switch.pump := toggle({src})\n")
+    assert max(len(k) for k in p.cells) < 100
+
+
+def test_messages_leave_out_block_bodies(host):
+    src = """
+let level =
+    now in 19:00..23:00     -> 100% - 96% * (age(19:00) / 4h)
+    else                    -> 100%
+"""
+    d = err(host, src + "let x = age(level) > 1h")
+    assert d.message.startswith("`cascade{…}` changes continuously"), d.message
+
+
+def test_latest_condition_reads_bind_as_written(host):
+    p = ok(host, "switch.pump := latest\n    sunset - 30min -> on\n    sunrise -> off\n")
+    cond = p.bindings[0].expr.arms[0].cond
+    assert cond.text == "sunset - 30min" and cond.prec == PREC["-"]
+    assert p.bindings[0].text == "switch.pump := latest{sunset - 30min -> on; sunrise -> off}"
 
 
 # ----------------------------------------------------------------- bindings

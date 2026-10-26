@@ -213,6 +213,11 @@ class DailyTime:
 
 
 DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+DAY_CONSTS = {name: frozenset({i}) for i, name in enumerate(DAY_NAMES)} | {
+    "weekday": frozenset(range(5)),
+    "weekend": frozenset({5, 6}),
+}
+MIDNIGHT = DailyTime(0)
 
 
 @dataclass(frozen=True, slots=True)

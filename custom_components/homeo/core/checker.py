@@ -16,10 +16,10 @@ from . import ast as A
 from . import ir
 from .errors import DiagnosticSink, Span, did_you_mean
 from .host import EntityCatalog, EntityState
-from .printer import PREC, fmt_duration, to_source
+from .printer import fmt_duration, to_source
 from .sun import SUN_ENTITY
 from .types import NUMERIC, T, article, assignable, join
-from .values import DAY_NAMES, KEEP, UNKNOWN, DailyTime, Days, Num, parse_timestamp
+from .values import DAY_CONSTS, KEEP, MIDNIGHT, DailyTime, Days, Num, parse_timestamp
 from .writers import WHOLE_ONLY, WRITERS, Writer
 
 KNOWN_DOMAINS = frozenset(
@@ -60,12 +60,7 @@ KNOWN_ATTRS: dict[tuple[str, str], T] = {
 
 BUILTIN_FUNCS = ("age", "fresh", "previous", "toggle", "count", "manual", "available")
 SOLAR = ("sunrise", "sunset", "dawn", "dusk")
-DAY_CONSTS = {name: frozenset({i}) for i, name in enumerate(DAY_NAMES)} | {
-    "weekday": frozenset(range(5)),
-    "weekend": frozenset({5, 6}),
-}
 BUILTIN_NAMES = ("now", "today", *SOLAR, *DAY_CONSTS)
-MIDNIGHT = DailyTime(0)
 
 
 @dataclass
@@ -179,7 +174,7 @@ def infer_attr_type(entity_id: str, attr: str, state: EntityState | None) -> T |
 
 
 def _err_node(span: Span, text: str = "<error>") -> ir.Node:
-    return ir.Const(T.ANY, span, text, False, UNKNOWN)
+    return ir.Error(T.ANY, span, label=text)
 
 
 class _Fail(Exception):
@@ -349,7 +344,7 @@ class Checker:
         cell = self.cell(
             ir.EntityCell(f"state:{entity_id}", t, entity_id, span, entity_id=entity_id)
         )
-        return ir.Read(cell.type, span, entity_id, False, cell)
+        return ir.Read(cell.type, span, False, cell)
 
     def attr_read(self, entity_id: str, attr: str, quoted: bool, span: Span) -> ir.Node:
         domain = entity_id.split(".", 1)[0]
@@ -369,7 +364,7 @@ class Checker:
                     f"event:{text}", T.TIMESTAMP, text, span, entity_id=entity_id, event_type=attr
                 )
             )
-            return ir.Read(T.TIMESTAMP, span, text, False, cell)
+            return ir.Read(T.TIMESTAMP, span, False, cell)
         t = infer_attr_type(entity_id, attr, state)
         if t is None:
             hint = None
@@ -381,13 +376,14 @@ class Checker:
                 )
             self.sink.warning(f"`{entity_id}` has no attribute `{attr}` right now", span, hint)
             t = T.ANY
-        text = (
-            f'{entity_id}["{attr}"]' if quoted or not attr.isidentifier() else f"{entity_id}.{attr}"
-        )
+        # `x.a` and `x["a"]` are one cell, so it prints one way; only an event's attributes
+        # need quoting (`event.x.a` is an event type)
+        quote = domain == "event" or not attr.isidentifier()
+        text = f'{entity_id}["{attr}"]' if quote else f"{entity_id}.{attr}"
         cell = self.cell(
             ir.EntityCell(f"attr:{entity_id}.{attr}", t, text, span, entity_id=entity_id, attr=attr)
         )
-        return ir.Read(t, span, text, False, cell)
+        return ir.Read(t, span, False, cell)
 
     def sun_cell(self, span: Span, *times: DailyTime) -> ir.CellDef | None:
         """The `sun.sun` cell, if any of `times` is solar (D4: solar times come from it)."""
@@ -428,7 +424,7 @@ class Checker:
             if segs:
                 self.fail(f"state machine `{name}` has no attributes", segs[0].span)
             cell = self.machines[name]
-            return ir.Read(T.STRING, e.span, name, False, cell)
+            return ir.Read(T.STRING, e.span, False, cell)
         if not segs and name in BUILTIN_NAMES:
             return self.builtin_name(name, head.span)
         if name in self.domains and segs:
@@ -466,50 +462,45 @@ class Checker:
 
     def builtin_name(self, name: str, span: Span) -> ir.Node:
         if name == "now":
-            return ir.Now(T.TIMESTAMP, span, "now", True)
+            return ir.Now(T.TIMESTAMP, span, True)
         if name == "today":
-            return ir.Today(T.DAY, span, "today")
+            return ir.Today(T.DAY, span)
         if name in SOLAR:
-            return ir.Const(T.TIMEOFDAY, span, name, False, DailyTime(solar=name))
-        return ir.Const(T.DAY, span, name, False, Days(DAY_CONSTS[name]))
+            return ir.Const(T.TIMEOFDAY, span, False, DailyTime(solar=name))
+        return ir.Const(T.DAY, span, False, Days(DAY_CONSTS[name]))
 
     # ----------------------------------------------------------- expressions
 
     def resolve(self, e: A.Expr, ctx: _Ctx) -> ir.Node:
         match e:
-            case A.BoolLit(value=v, word=w):
-                return ir.Const(T.BOOL, e.span, w, False, v)
+            case A.BoolLit(value=v):
+                return ir.Const(T.BOOL, e.span, False, v)
             case A.NumberLit(value=v, percent=p):
-                return ir.Const(
-                    T.PERCENT if p else T.NUMBER, e.span, to_source(e), False, Num.of(v)
-                )
+                return ir.Const(T.PERCENT if p else T.NUMBER, e.span, False, Num.of(v))
             case A.DurationLit(seconds=s):
-                return ir.Const(T.DURATION, e.span, to_source(e), False, Num.of(s))
+                return ir.Const(T.DURATION, e.span, False, Num.of(s))
             case A.TimeLit(seconds=s):
-                return ir.Const(T.TIMEOFDAY, e.span, to_source(e), False, DailyTime(s))
+                return ir.Const(T.TIMEOFDAY, e.span, False, DailyTime(s))
             case A.StringLit(value=v):
-                return ir.Const(T.STRING, e.span, to_source(e), False, v)
+                return ir.Const(T.STRING, e.span, False, v)
             case A.KeepLit():
-                return ir.Const(T.KEEP, e.span, "keep", False, KEEP)
+                return ir.Const(T.KEEP, e.span, False, KEEP)
             case A.Name() | A.Attr():
                 return self.resolve_path(e, ctx)
             case A.Unary(op="not", operand=o):
                 x = self.want_bool(self.resolve(o, ctx), "`not`")
-                text = f"not {self.wrap(x, PREC['not'])}"
-                return ir.Not(T.BOOL, e.span, text, False, x, prec=PREC["not"])
+                return ir.Not(T.BOOL, e.span, False, x)
             case A.Unary(op="-", operand=o):
                 x = self.resolve(o, ctx)
                 if x.type not in (T.NUMBER, T.PERCENT, T.DURATION, T.ANY):
                     self.fail(f"can't negate {article(x.type)}", e.span)
-                text, prec = f"-{self.wrap(x, PREC['neg'])}", PREC["neg"]
                 if isinstance(x, ir.Const):
-                    return ir.Const(x.type, e.span, text, False, -x.value, prec=prec)
-                return ir.Neg(x.type, e.span, text, x.moving, x, prec=prec)
+                    return ir.Const(x.type, e.span, False, -x.value)
+                return ir.Neg(x.type, e.span, x.moving, x)
             case A.Binary(op="and" | "or" as op, left=l, right=r):
                 a = self.want_bool(self.resolve(l, ctx), f"`{op}`")
                 b = self.want_bool(self.resolve(r, ctx), f"`{op}`")
-                text = self.infix(a, op, b, PREC[op])
-                return ir.BoolOp(T.BOOL, e.span, text, False, op, a, b, prec=PREC[op])
+                return ir.BoolOp(T.BOOL, e.span, False, op, a, b)
             case A.Binary(op="+" | "-" | "*" | "/" as op, left=l, right=r):
                 return self.arith(op, self.resolve(l, ctx), self.resolve(r, ctx), e.span)
             case A.Binary(op="??", left=l, right=r):
@@ -519,9 +510,7 @@ class Checker:
                     self.fail(
                         f"`??` needs both sides of the same type ({a.type} vs {b.type})", e.span
                     )
-                p = PREC["??"]
-                text = self.infix(a, "??", b, p)
-                return ir.Coalesce(t, e.span, text, a.moving or b.moving, a, b, prec=p)
+                return ir.Coalesce(t, e.span, a.moving or b.moving, a, b)
             case A.Binary(op="in" | "not in" as op, left=l, right=r):
                 return self.membership(op == "not in", l, r, e.span, ctx)
             case A.Binary(op=op, left=l, right=r):
@@ -538,10 +527,7 @@ class Checker:
                     self.fail(
                         f"both branches must have the same type ({a.type} vs {b.type})", e.span
                     )
-                # `a if c else b` is right-associative: only the else branch may be a bare ternary
-                p = PREC["ternary"]
-                text = f"{self.wrap(a, p + 1)} if {self.wrap(cond, p + 1)} else {self.wrap(b, p)}"
-                return ir.IfElse(ty, e.span, text, a.moving or b.moving, cond, a, b, prec=p)
+                return ir.IfElse(ty, e.span, a.moving or b.moving, cond, a, b)
             case A.For(operand=o, duration=d) | A.Within(operand=o, duration=d):
                 # D11: `x for D` = `x and age(x) >= D`; `x within D` = `x or age(x) < D`
                 within = isinstance(e, A.Within)
@@ -553,30 +539,12 @@ class Checker:
                 if dur.value.lo <= 0:
                     self.fail(f"`{word}` needs a positive duration", d.span)
                 cell = self.history_cell(x, f"`{word}`")
-                read = ir.Read(T.BOOL, o.span, cell.text, False, cell, prec=x.prec)
-                age = ir.Age(T.DURATION, e.span, f"age({cell.text})", True, cell)
+                read = ir.Read(T.BOOL, o.span, False, cell)
+                age = ir.Age(T.DURATION, e.span, True, cell)
                 op = "<" if within else ">="
-                cmp = ir.Compare(
-                    T.BOOL,
-                    e.span,
-                    self.infix(age, op, dur, PREC["cmp"]),
-                    False,
-                    op,
-                    age,
-                    dur,
-                    prec=PREC["cmp"],
-                )
-                text = f"{self.wrap(x, PREC['cmp'])} {word} {self.wrap(dur, PREC['??'])}"
-                return ir.BoolOp(
-                    T.BOOL,
-                    e.span,
-                    text,
-                    False,
-                    "or" if within else "and",
-                    read,
-                    cmp,
-                    prec=PREC["for"],
-                )
+                cmp = ir.Compare(T.BOOL, e.span, False, op, age, dur)
+                # prints back as `x for D` / `x within D` (ir.node_text)
+                return ir.BoolOp(T.BOOL, e.span, False, "or" if within else "and", read, cmp)
             case A.Every(period=p):
                 dur = self.const_duration(self.resolve(p, ctx), "`every`")
                 if dur.value.lo <= 0:
@@ -592,16 +560,15 @@ class Checker:
                         f"every:{dur.value.lo:g}", T.TIMESTAMP, text, e.span, period=dur.value.lo
                     )
                 )
-                return ir.Read(T.TIMESTAMP, e.span, text, False, cell)
+                return ir.Read(T.TIMESTAMP, e.span, False, cell)
             case A.Call():
                 return self.call(e, ctx)
             case A.OnCall(kwargs=kwargs):
                 params = []
                 for k in kwargs:
                     params.append((k.name, self.resolve(k.value, ctx)))
-                text = "on(" + ", ".join(f"{n}: {v.text}" for n, v in params) + ")"
                 moving = any(v.moving for _, v in params)  # a behavior (D23)
-                node = ir.OnValue(T.ONSPEC, e.span, text, moving, params)
+                node = ir.OnValue(T.ONSPEC, e.span, moving, params)
                 self._on_spans[id(node)] = {k.name: k.span for k in kwargs}
                 return node
             case A.Cascade(arms=arms):
@@ -611,40 +578,30 @@ class Checker:
         self.fail(f"unsupported expression {type(e).__name__}", e.span)
         raise AssertionError
 
-    @staticmethod
-    def wrap(n: ir.Node, min_prec: int) -> str:
-        """`n`'s text, parenthesised if it binds more loosely than its place needs (PREC)."""
-        return f"({n.text})" if n.prec < min_prec else n.text
-
-    @classmethod
-    def infix(cls, a: ir.Node, op: str, b: ir.Node, prec: int) -> str:
-        """Text of a left-associative binary operator: `a - (b - c)` keeps its parentheses."""
-        return f"{cls.wrap(a, prec)} {op} {cls.wrap(b, prec + 1)}"
-
     def want_bool(self, n: ir.Node, what: str, age_hint: str | None = None) -> ir.Node:
         """`age_hint` replaces the hint for a timestamp or time of day (`for`/`within`)."""
         if n.type in (T.BOOL, T.ANY):
             return n
         if n.type == T.TIMESTAMP:
             self.fail(
-                f"`{n.text}` is a timestamp, but {what} needs a condition",
+                f"`{n.brief}` is a timestamp, but {what} needs a condition",
                 n.span,
-                age_hint or f"did you mean `age({n.text}) < 30min`?",
+                age_hint or f"did you mean `age({n.brief}) < 30min`?",
             )
         if n.type == T.TIMEOFDAY:
             self.fail(
-                f"`{n.text}` is a time of day, but {what} needs a condition",
+                f"`{n.brief}` is a time of day, but {what} needs a condition",
                 n.span,
                 age_hint
-                or f"did you mean `now >= {n.text}`, or `fresh({n.text})` in a state machine?",
+                or f"did you mean `now >= {n.brief}`, or `fresh({n.brief})` in a state machine?",
             )
         if n.type == T.DURATION:
             self.fail(
-                f"`{n.text}` is a duration, but {what} needs a condition",
+                f"`{n.brief}` is a duration, but {what} needs a condition",
                 n.span,
-                f"compare it, e.g. `{n.text} > 10min`",
+                f"compare it, e.g. `{n.brief} > 10min`",
             )
-        self.fail(f"{what} needs a condition, but `{n.text}` is {article(n.type)}", n.span)
+        self.fail(f"{what} needs a condition, but `{n.brief}` is {article(n.type)}", n.span)
         raise AssertionError
 
     @staticmethod
@@ -671,14 +628,15 @@ class Checker:
             return n.cell
         if n.moving:
             self.fail(
-                f"`{n.text}` changes continuously, so {what} can't track when it changed",
+                f"`{n.brief}` changes continuously, so {what} can't track when it changed",
                 n.span,
                 "compare it first, e.g. `age(x) > 10min`",
             )
         if n.type == T.KEEP:
             self.fail("`keep` is only allowed as a binding result", n.span)
-        key = f"expr:{ir.structure(n)}"  # by structure: different trees can print alike
-        return self.cell(ir.ExprCell(key, n.type, n.text, n.span, expr=n))
+        # by structure: different trees can print alike in other forms, and the text of a
+        # tree can change (say, with how constants print), which mustn't lose its history
+        return self.cell(ir.ExprCell(ir.expr_key(n), n.type, n.text, n.span, expr=n))
 
     def occurrence_cell(self, e: A.Expr, ctx: _Ctx, what: str) -> ir.CellDef:
         """A bool or timestamp signal used as an occurrence (§3); bare times become time points."""
@@ -696,7 +654,7 @@ class Checker:
             )
         if n.type not in (T.BOOL, T.TIMESTAMP, T.ANY):
             self.fail(
-                f"{what} needs a bool or a timestamp, but `{n.text}` is {article(n.type)}", n.span
+                f"{what} needs a bool or a timestamp, but `{n.brief}` is {article(n.type)}", n.span
             )
         return self.history_cell(n, what)
 
@@ -707,9 +665,8 @@ class Checker:
         if ta == T.TIMEOFDAY and op in "+-" and tb == T.DURATION:
             if isinstance(a, ir.Const) and isinstance(b, ir.Const):
                 delta = b.value.lo if op == "+" else -b.value.lo
-                text = self.infix(a, op, b, PREC[op])
                 value = a.value.shifted(delta)
-                return ir.Const(T.TIMEOFDAY, span, text, False, value, prec=PREC[op])
+                return ir.Const(T.TIMEOFDAY, span, False, value)
             self.fail("a time of day can only be shifted by a fixed duration", span)
         if num(ta) and num(tb):
             if ta == T.PERCENT and (tb == T.PERCENT or op in "*/"):
@@ -734,7 +691,6 @@ class Checker:
             self.fail(f"can't apply `{op}` to two values that both change with the clock", span)
         if op == "/" and b.moving:
             self.fail("can't divide by a value that changes with the clock", span)
-        text = self.infix(a, op, b, PREC[op])
         if isinstance(a, ir.Const) and isinstance(b, ir.Const) and isinstance(a.value, Num):
             from .values import num_div, num_mul
 
@@ -744,13 +700,10 @@ class Checker:
                 "*": lambda: num_mul(a.value, b.value),
                 "/": lambda: num_div(a.value, b.value),
             }[op]()
-            return ir.Const(result, span, text, False, value, prec=PREC[op])
-        return ir.Arith(result, span, text, a.moving or b.moving, op, a, b, prec=PREC[op])
+            return ir.Const(result, span, False, value)
+        return ir.Arith(result, span, a.moving or b.moving, op, a, b)
 
     def compare(self, op: str, a: ir.Node, b: ir.Node, span: Span) -> ir.Node:
-        # comparisons don't chain, so neither side may be a bare comparison
-        cmp = PREC["cmp"]
-        text = f"{self.wrap(a, cmp + 1)} {op} {self.wrap(b, cmp + 1)}"
         # now vs a time of day → a time range (I3)
         if (
             isinstance(a, ir.Now)
@@ -765,28 +718,24 @@ class Checker:
                 self.fail("compare `now` with a fixed time of day", span)
             if op in (">", ">=") and b.value == MIDNIGHT:
                 # every time of day is at or after midnight (the range 00:00..00:00 is empty)
-                return ir.Const(T.BOOL, span, text, False, True, prec=cmp)
+                return ir.Const(T.BOOL, span, False, True)
             if op in (">", ">="):
                 return ir.InTimeRange(
                     T.BOOL,
                     span,
-                    text,
                     False,
                     b.value,
                     MIDNIGHT,
                     sun=self.sun_cell(span, b.value),
-                    prec=cmp,
                 )
             if op in ("<", "<="):
                 return ir.InTimeRange(
                     T.BOOL,
                     span,
-                    text,
                     False,
                     MIDNIGHT,
                     b.value,
                     sun=self.sun_cell(span, b.value),
-                    prec=cmp,
                 )
             self.fail(
                 f"`now {op} {b.text}` is never exactly true",
@@ -797,7 +746,7 @@ class Checker:
             other = b if isinstance(a, ir.Today) else a
             if op not in ("==", "!=") or not isinstance(other, ir.Const) or other.type != T.DAY:
                 self.fail("`today` can only be compared with days, e.g. `today == sat`", span)
-            return ir.DayIn(T.BOOL, span, text, False, other.value, op == "!=", prec=cmp)
+            return ir.DayIn(T.BOOL, span, False, other.value, op == "!=")
         for n in (a, b):
             if n.type == T.KEEP:
                 self.fail("`keep` can't be compared", n.span)
@@ -821,7 +770,7 @@ class Checker:
                     self.compare_hint(a, b),
                 )
         a, b = self.percent_scale(a, b), self.percent_scale(b, a)
-        return ir.Compare(T.BOOL, span, text, False, op, a, b, prec=cmp)
+        return ir.Compare(T.BOOL, span, False, op, a, b)
 
     def compare_hint(self, a: ir.Node, b: ir.Node) -> str | None:
         for x, y in ((a, b), (b, a)):
@@ -831,9 +780,9 @@ class Checker:
                 and isinstance(y, ir.Const)
                 and y.value in ("on", "off")
             ):
-                return f"`{x.text}` is on/off: write `{x.text}` or `not {x.text}`, or compare with `{y.value}` without quotes"
+                return f"`{x.brief}` is on/off: write `{x.brief}` or `not {x.brief}`, or compare with `{y.value}` without quotes"
             if x.type == T.TIMESTAMP and y.type == T.DURATION:
-                return f"did you mean `age({x.text})`?"
+                return f"did you mean `age({x.brief})`?"
         return None
 
     def check_string_literal(self, x: ir.Node, lit: ir.Node) -> None:
@@ -866,9 +815,8 @@ class Checker:
         if not isinstance(cell, ir.EntityCell):
             return p
         if cell.attr == "brightness" and cell.entity_id.startswith("light."):
-            if isinstance(p, ir.Const):
-                return ir.Const(T.NUMBER, p.span, p.text, False, p.value.scale(2.55), prec=p.prec)
-            return ir.Scale(T.NUMBER, p.span, p.text, p.moving, p, 2.55, prec=p.prec)
+            # not folded into a constant, so it still prints as the percentage written
+            return ir.Scale(T.NUMBER, p.span, p.moving, p, 2.55)
         if cell.attr is None:
             st = self.entity_state(cell.entity_id)
             unit = st.attributes.get("unit_of_measurement") if st else None
@@ -882,21 +830,14 @@ class Checker:
 
     def membership(self, negate: bool, lhs: A.Expr, r: A.Expr, span: Span, ctx: _Ctx) -> ir.Node:
         x = self.resolve(lhs, ctx)
-        text_op = "not in" if negate else "in"
-        cmp, bound = PREC["cmp"], PREC["??"]
         if isinstance(r, A.Range):
             lo, hi = self.resolve(r.lo, ctx), self.resolve(r.hi, ctx)
-            text = (
-                f"{self.wrap(x, cmp + 1)} {text_op} {self.wrap(lo, bound)}..{self.wrap(hi, bound)}"
-            )
             if isinstance(x, ir.Now):
                 for b in (lo, hi):
                     if not (isinstance(b, ir.Const) and b.type == T.TIMEOFDAY):
                         self.fail("a time range needs times of day, e.g. `22:00..06:00`", b.span)
                 sun = self.sun_cell(span, lo.value, hi.value)
-                return ir.InTimeRange(
-                    T.BOOL, span, text, False, lo.value, hi.value, negate, sun=sun, prec=cmp
-                )
+                return ir.InTimeRange(T.BOOL, span, False, lo.value, hi.value, negate, sun=sun)
             if isinstance(x, ir.Today):
                 for b in (lo, hi):
                     if not (isinstance(b, ir.Const) and b.type == T.DAY and len(b.value.days) == 1):
@@ -904,7 +845,7 @@ class Checker:
                 (a,) = lo.value.days
                 (z,) = hi.value.days
                 days = frozenset((a + i) % 7 for i in range(((z - a) % 7) + 1))
-                return ir.DayIn(T.BOOL, span, text, False, Days(days), negate, prec=cmp)
+                return ir.DayIn(T.BOOL, span, False, Days(days), negate)
             self.fail(
                 "ranges are for times of day and days",
                 span,
@@ -918,15 +859,7 @@ class Checker:
                 if not (isinstance(n, ir.Const) and n.type == T.DAY):
                     self.fail("`today in …` needs days, e.g. `today in [sat, sun]`", item.span)
                 days |= n.value.days
-            return ir.DayIn(
-                T.BOOL,
-                span,
-                f"today {text_op} {to_source(r)}",
-                False,
-                Days(frozenset(days)),
-                negate,
-                prec=cmp,
-            )
+            return ir.DayIn(T.BOOL, span, False, Days(frozenset(days)), negate)
         if not isinstance(r, A.ListExpr):
             self.fail("`in` needs a list or a range", r.span, 'e.g. `x in ["heating", "idle"]`')
         items = [self.resolve(i, ctx) for i in r.items]
@@ -934,8 +867,7 @@ class Checker:
             if join(x.type, it.type) is None or it.type == T.KEEP:
                 self.fail(f"can't compare {article(x.type)} with {article(it.type)}", it.span)
             self.check_string_literal(x, it)
-        text = f"{self.wrap(x, cmp + 1)} {text_op} [" + ", ".join(i.text for i in items) + "]"
-        return ir.InList(T.BOOL, span, text, False, x, items, negate, prec=cmp)
+        return ir.InList(T.BOOL, span, False, x, items, negate)
 
     # ------------------------------------------------------------- functions
 
@@ -977,7 +909,7 @@ class Checker:
                 cell = self.occurrence_cell(arg, ctx, "`age`")
             else:
                 cell = self.history_cell(n, "`age`")
-            return ir.Age(T.DURATION, e.span, f"age({cell.text})", True, cell)
+            return ir.Age(T.DURATION, e.span, True, cell)
         if name == "fresh":
             self.nargs(e, name, 1)
             if ctx.machine is None:
@@ -987,17 +919,17 @@ class Checker:
                     "outside a state machine, use `age(x) < D` for 'happened recently'",
                 )
             cell = self.occurrence_cell(e.args[0], ctx, "`fresh`")
-            return ir.Fresh(T.BOOL, e.span, f"fresh({cell.text})", False, cell, ctx.machine)
+            return ir.Fresh(T.BOOL, e.span, False, cell, ctx.machine)
         if name == "previous":
             self.nargs(e, name, 1)
             n = self.resolve(e.args[0], ctx)
             cell = self.history_cell(n, "`previous`")
-            return ir.Previous(cell.type, e.span, f"previous({cell.text})", False, cell)
+            return ir.Previous(cell.type, e.span, False, cell)
         if name == "available":
             self.nargs(e, name, 1)
             n = self.resolve(e.args[0], ctx)
             cell = self.history_cell(n, "`available`")
-            return ir.Available(T.BOOL, e.span, f"available({cell.text})", False, cell)
+            return ir.Available(T.BOOL, e.span, False, cell)
         if name == "manual":
             self.nargs(e, name, 1)
             n = self.resolve(e.args[0], ctx)
@@ -1012,7 +944,7 @@ class Checker:
             cell = self.cell(
                 ir.ManualCell(f"manual:{eid}", T.TIMESTAMP, text, e.span, entity_id=eid)
             )
-            return ir.Read(T.TIMESTAMP, e.span, text, False, cell)
+            return ir.Read(T.TIMESTAMP, e.span, False, cell)
         if name == "toggle":
             self.nargs(e, name, 1, ("initial",))
             cell = self.occurrence_cell(e.args[0], ctx, "`toggle`")
@@ -1033,7 +965,7 @@ class Checker:
                     initial=initial,
                 )
             )
-            return ir.Read(T.BOOL, e.span, text, False, tcell)
+            return ir.Read(T.BOOL, e.span, False, tcell)
         if name == "count":
             self.nargs(e, name, 2)
             cell = self.occurrence_cell(e.args[0], ctx, "`count`")
@@ -1049,7 +981,7 @@ class Checker:
                     window=dur.value.lo,
                 )
             )
-            return ir.Read(T.NUMBER, e.span, text, False, ccell)
+            return ir.Read(T.NUMBER, e.span, False, ccell)
         raise AssertionError(name)
 
     def bus_event(self, event_type: str, e: A.Call) -> ir.Node:
@@ -1071,32 +1003,19 @@ class Checker:
                 f"bus:{text}", T.TIMESTAMP, text, e.span, event_type=event_type, filters=filters
             )
         )
-        return ir.Read(T.TIMESTAMP, e.span, text, False, cell)
+        return ir.Read(T.TIMESTAMP, e.span, False, cell)
 
     # ---------------------------------------------------------------- blocks
 
     def cascade(self, arms: list[A.Arm | A.Group], span: Span, ctx: _Ctx) -> ir.Node:
         out = [self.arm(a, ctx, latest=False) for a in arms]
         t = self.join_results(out, span)
-        return ir.Cascade(t, span, self.block_text("cascade", out), self.any_moving(out), out)
+        return ir.Cascade(t, span, self.any_moving(out), out)
 
     def latest(self, arms: list[A.Arm | A.Group], span: Span, ctx: _Ctx) -> ir.Node:
         out = [self.arm(a, ctx, latest=True) for a in arms]
         t = self.join_results(out, span)
-        return ir.Latest(t, span, self.block_text("latest", out), self.any_moving(out), out)
-
-    @staticmethod
-    def block_text(word: str, arms: list[ir.ArmIR | ir.GroupIR]) -> str:
-        """`cascade{a -> x; else -> y}`, as printer.to_source writes a block on one line."""
-
-        def arm(a: ir.ArmIR | ir.GroupIR) -> str:
-            if isinstance(a, ir.GroupIR):
-                return f"{a.text} | " + " | ".join(arm(s) for s in a.arms)
-            return a.text
-
-        return (
-            word + "{" + "; ".join(arm(a) for a in arms if not getattr(a, "implicit", False)) + "}"
-        )
+        return ir.Latest(t, span, self.any_moving(out), out)
 
     def any_moving(self, arms: list[ir.ArmIR | ir.GroupIR]) -> bool:
         """Whether a block's result can be a behavior (D23): some arm's result moves."""
@@ -1106,19 +1025,17 @@ class Checker:
         if isinstance(a, A.Group):
             guard = self.arm_cond(a.guard, ctx, latest)
             subs = [self.arm(s, ctx, latest=False) for s in a.arms]
-            return ir.GroupIR(guard, subs, a.span, guard.text, to_source(a.guard))
+            return ir.GroupIR(guard, subs, a.span, to_source(a.guard))
         cond = None if a.cond is None else self.arm_cond(a.cond, ctx, latest)
         result = self.resolve(a.result, ctx)  # may be a behavior (D23); bindings check it
-        text = f"{'else' if cond is None else cond.text} -> {result.text}"
         cond_source = "else" if a.cond is None else to_source(a.cond)
         source = f"{cond_source} -> {to_source(a.result)}"
-        return ir.ArmIR(cond, result, a.span, text, source, cond_source)
+        return ir.ArmIR(cond, result, a.span, source, cond_source)
 
     def arm_cond(self, e: A.Expr, ctx: _Ctx, latest: bool) -> ir.Node:
         if latest:
             cell = self.occurrence_cell(e, ctx, "a `latest` condition")
-            prec = cell.expr.prec if isinstance(cell, ir.ExprCell) else PREC["postfix"]
-            return ir.Read(cell.type, e.span, cell.text, False, cell, prec=prec)
+            return ir.Read(cell.type, e.span, False, cell)
         return self.want_bool(self.resolve(e, ctx), "an arm")
 
     def join_results(self, arms: list[ir.ArmIR | ir.GroupIR], span: Span) -> T:
@@ -1220,11 +1137,9 @@ class Checker:
                 pass
             elif isinstance(value, ir.Latest):
                 # Until one of the conditions has happened, leave the device alone.
-                keep = ir.Const(T.KEEP, stmt.value.span, "keep", False, KEEP)
+                keep = ir.Const(T.KEEP, stmt.value.span, False, KEEP)
                 value.arms.append(
-                    ir.ArmIR(
-                        None, keep, stmt.value.span, "else -> keep", "else -> keep", implicit=True
-                    )
+                    ir.ArmIR(None, keep, stmt.value.span, "else -> keep", implicit=True)
                 )
             else:
                 self.error(
@@ -1234,7 +1149,7 @@ class Checker:
                 )
         if value.moving and not writer.follows:
             self.fail(
-                f"`{value.text}` changes continuously, so it can't be bound to `{key}`",
+                f"`{value.brief}` changes continuously, so it can't be bound to `{key}`",
                 value.span,
                 "compare it first, e.g. `age(x) > 10min`",
             )
@@ -1299,7 +1214,7 @@ class Checker:
             self.want_bool(r, f"`{key}`")
         if not any(assignable(r.type, t) for t in writer.accepts):
             self.fail(
-                f"`{key}` takes {writer.description}, but `{r.text}` is {article(r.type)}", r.span
+                f"`{key}` takes {writer.description}, but `{r.brief}` is {article(r.type)}", r.span
             )
         if isinstance(r, ir.OnValue):
             spans = self._on_spans.get(id(r), {})
@@ -1406,7 +1321,7 @@ class Checker:
         """Whether a machine's arms read (through anything but manual()) one of these
         binding targets."""
         m = self.machines[name]
-        reads = self.reads(ir.Read(T.STRING, m.span, name, False, m), set())
+        reads = self.reads(ir.Read(T.STRING, m.span, False, m), set())
         for k in keys:
             parts = k.split(".")
             w = WRITERS.get((parts[0], parts[2] if len(parts) > 2 else None))
@@ -1545,7 +1460,7 @@ class Checker:
         for k in c.kwargs:
             v = self.resolve(k.value, ctx)
             if v.type in (T.KEEP, T.ONSPEC):
-                self.fail(f"`{v.text}` can't be sent as service data", k.value.span)
+                self.fail(f"`{v.brief}` can't be sent as service data", k.value.span)
             data.append((k.name, v))
         text = (
             (f"{entity_id}.{service}" if entity_id else f"{domain}.{service}")

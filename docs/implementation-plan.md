@@ -140,12 +140,19 @@ The runtime builds a **cell** for each thing whose history matters:
 - every argument of a history construct (`age`, `fresh`, `latest` conditions, `on`, `previous`,
   `toggle`, `count`; `for` and `within` after expansion).
 
-An argument's cell is keyed by the **structure** of its checked expression (`ir.structure`: a
-fully bracketed form over node kinds, operators, types, constants and the cells it reads), not by
-its text. Two uses share a cell exactly when they are the same expression after `let`s are
-expanded, however they're parenthesised, so different expressions can never share history.
-Time points are keyed by their value. Display text is printed separately with the parser's
-precedence table, so it always reads back as the same expression.
+An argument's cell is keyed by the **structure** of its checked expression (`ir.expr_key`: a
+digest of `ir.structure`, a fully bracketed form over node kinds, operators, constants and the
+cells it reads), not by its text. Two uses share a cell exactly when they are the same expression
+after `let`s are expanded, however they're parenthesised, so different expressions can never
+share history. Inferred types aren't part of the key: they can change with an entity's state when
+the rules are checked (an `unavailable` sensor has no unit), and a reload then mustn't lose the
+cell's history. Time points are keyed by their value.
+
+Display text is printed from the checked tree (`ir.node_text`) with the parser's precedence
+table, so it always reads back as the same expression, and two uses that share a cell print
+alike: constants print from their values (`2 * 3` as `6`), `now >= 22:00` and `today in
+mon..fri` as their time range and set of days (`today == weekday`), and an expanded `for` or
+`within` as the sugar.
 
 Everything else is a pure expression evaluated inside the cell that contains it.
 

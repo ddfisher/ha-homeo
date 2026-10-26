@@ -4,8 +4,8 @@
   `homeo.explain`. Runtime state is keyed by structure instead (`ir.structure`).
 - `sexpr` gives a fully parenthesised form, handy for tests.
 
-`PREC` is the grammar's precedence levels (higher binds tighter). The checker builds IR display
-text with the same table, so both print the way the parser reads.
+`PREC` is the grammar's precedence levels (higher binds tighter). `ir.node_text` prints IR with
+the same table, so both print the way the parser reads.
 """
 
 from __future__ import annotations
@@ -52,6 +52,10 @@ def fmt_time(seconds: int) -> str:
     return f"{h:02d}:{m:02d}" + (f":{s:02d}" if s else "")
 
 
+def fmt_string(v: str) -> str:
+    return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+
+
 def fmt_number(v: float) -> str:
     if isinstance(v, float) and v.is_integer():
         return str(int(v))
@@ -93,7 +97,7 @@ def to_source(e: A.Expr) -> str:
         case A.TimeLit(seconds=s):
             return fmt_time(s)
         case A.StringLit(value=v):
-            return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+            return fmt_string(v)
         case A.KeepLit():
             return "keep"
         case A.ListExpr(items=items):
@@ -112,7 +116,8 @@ def to_source(e: A.Expr) -> str:
         case A.Range(lo=lo, hi=hi):
             return f"{sub(lo, PREC['??'])}..{sub(hi, PREC['??'])}"
         case A.Ternary(then=t, cond=c, otherwise=o):
-            return f"{sub(t, 2)} if {sub(c, 2)} else {sub(o, 1)}"
+            p = PREC["ternary"]
+            return f"{sub(t, p + 1)} if {sub(c, p + 1)} else {sub(o, p)}"
         case A.For(operand=o, duration=d):
             return f"{sub(o, PREC['cmp'])} for {sub(d, PREC['??'])}"
         case A.Within(operand=o, duration=d):
