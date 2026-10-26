@@ -5,7 +5,7 @@ import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } 
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, indentOnInput, indentUnit } from "@codemirror/language";
 import { lintGutter, linter, lintKeymap, setDiagnostics } from "@codemirror/lint";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { searchKeymap } from "@codemirror/search";
 import { Compartment, EditorState } from "@codemirror/state";
 import {
   EditorView,
@@ -268,7 +268,6 @@ class HomeoPanel extends HTMLElement {
         bracketMatching(),
         closeBrackets(),
         highlightActiveLine(),
-        highlightSelectionMatches(),
         homeoLanguage,
         homeoHighlight,
         autocompletion({ override: [homeoCompletions(() => this._hass)] }),
