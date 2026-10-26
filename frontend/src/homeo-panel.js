@@ -275,7 +275,7 @@ class HomeoPanel extends HTMLElement {
         homeoHover({
           getHass: () => this._hass,
           lookup: (name) => this.lookupValue(name),
-          isDirty: () => this.dirty,
+          staleness: () => this.hoverStaleness(),
         }),
         check,
         lintGutter(),
@@ -317,6 +317,12 @@ class HomeoPanel extends HTMLElement {
 
   ws(msg) {
     return this._hass.callWS(msg);
+  }
+
+  /** Why the running version of the open file may differ from the editor, for hovers. */
+  hoverStaleness() {
+    if (this.dirty) return "unsaved";
+    return this.files.find((f) => f.name === this.current)?.errors ? "errors" : null;
   }
 
   /** A `let` or `state` name's value in the running version of the open file, for hovers. */

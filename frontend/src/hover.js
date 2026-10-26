@@ -234,19 +234,27 @@ function builtinRows(name, states, now) {
   return next ? [["next", fmtInstant(next, now)]] : [];
 }
 
-/** The `homeo/value` result (or error) as rows and a note. */
-export function valueRows(result, { dirty } = {}) {
+/** The `homeo/value` result (or error) as rows and a note. `stale` says why the running
+ * version may differ from the editor: "unsaved" changes, or saved "errors" (the previous
+ * version keeps running). */
+export function valueRows(result, { stale } = {}) {
   if (result?.error) {
-    const note =
-      result.code === "not_found"
-        ? "No value yet: it isn't in the running version of this file. Save to see it."
-        : `No value: ${result.error}`;
+    let note = `No value: ${result.error}`;
+    if (result.code === "not_found") {
+      note =
+        stale === "errors"
+          ? "No value: it isn't in the version that's running, because this file has errors."
+          : "No value yet: it isn't in the running version of this file. Save to see it.";
+    }
     return { rows: [], note };
   }
   const rows = [["value", result.value]];
   if (result.type) rows.push(["type", result.type]);
   if (result.changed) rows.push(["changed", result.changed]);
-  const note = dirty ? "From the running version, without your unsaved changes." : undefined;
+  const note = {
+    unsaved: "From the running version, without your unsaved changes.",
+    errors: "From the previous version, which keeps running while this file has errors.",
+  }[stale];
   return { rows, note };
 }
 
@@ -269,10 +277,10 @@ export function hoverHtml(info) {
 
 /**
  * The hover extension. `getHass()` gives the live HA object; `lookup(name)` resolves to the
- * `homeo/value` result for a `let`/`state` name (or `{ error, code }`); `isDirty()` says
- * whether the editor has unsaved changes.
+ * `homeo/value` result for a `let`/`state` name (or `{ error, code }`); `staleness()` says
+ * why its values may not match the editor (see `valueRows`), or null.
  */
-export function homeoHover({ getHass, lookup, isDirty }) {
+export function homeoHover({ getHass, lookup, staleness }) {
   return hoverTooltip(async (view, pos, side) => {
     const ch = side < 0 ? pos - 1 : pos;
     if (ch < 0 || ch >= view.state.doc.length) return null;
@@ -281,7 +289,7 @@ export function homeoHover({ getHass, lookup, isDirty }) {
     if (!found) return null;
     const info = { ...found.info };
     if (info.title in SOLAR_ATTRS) info.rows = builtinRows(info.title, hass?.states ?? {}, new Date());
-    if (info.lookup) Object.assign(info, valueRows(await lookup(info.lookup), { dirty: isDirty() }));
+    if (info.lookup) Object.assign(info, valueRows(await lookup(info.lookup), { stale: staleness() }));
     return {
       pos: found.from,
       end: found.to,
@@ -293,5 +301,5 @@ export function homeoHover({ getHass, lookup, isDirty }) {
         return { dom };
       },
     };
-  });
+  }, { hideOnChange: true }); // its content describes the text as it was
 }

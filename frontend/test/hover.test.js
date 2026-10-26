@@ -76,6 +76,10 @@ test("builtin functions, names and keywords", () => {
   assert.equal(at(8, "now").info.kind, "time of day");
   assert.equal(at(8, "in").info.title, "x in a..b");
   assert.equal(at(8, "..").info.kind, "range");
+  // a range bound written right before `..` is a day or solar time, not an entity
+  const range = Text.of(["let w = today in mon..fri and now in sunset..23:00"]);
+  assert.equal(describe(range, range.toString().indexOf("mon"), HASS, NOW).info.title, "mon");
+  assert.equal(describe(range, range.toString().indexOf("sunset"), HASS, NOW).info.title, "sunset");
   assert.equal(at(1, "let").info.kind, "keyword");
   assert.equal(at(3, "state").info.kind, "keyword");
   assert.equal(at(6, "on(").info.title, "on(setting: value, …)");
@@ -155,8 +159,12 @@ test("value rows", () => {
     rows: [["value", "812"], ["type", "number"], ["changed", "08:07:00 (3min ago)"]],
     note: undefined,
   });
-  assert.match(valueRows({ value: "true" }, { dirty: true }).note, /without your unsaved changes/);
-  assert.match(valueRows({ error: "nope", code: "not_found" }).note, /isn't in the running version/);
+  assert.match(valueRows({ value: "true" }, { stale: "unsaved" }).note, /without your unsaved changes/);
+  assert.match(valueRows({ value: "true" }, { stale: "errors" }).note, /previous version, which keeps running/);
+  assert.match(valueRows({ error: "nope", code: "not_found" }).note, /isn't in the running version.*Save/);
+  const broken = valueRows({ error: "nope", code: "not_found" }, { stale: "errors" }).note;
+  assert.match(broken, /because this file has errors/);
+  assert.doesNotMatch(broken, /Save/);
 });
 
 test("formatting", () => {
