@@ -816,7 +816,7 @@ def test_restart_for_waits_full_duration():
 
 
 def test_restart_catches_up_time_based_results():
-    r = Rig("cover.blinds.position := 100 if now in 07:00..20:00 else 0")
+    r = Rig("cover.blinds.position := 100% if now in 07:00..20:00 else 0%")
     r.h.advance_to(r.h.local(2026, 1, 5, 21, 0))
     assert r.new_calls() == ["cover.set_cover_position cover.blinds position=0"]
     r.restart(downtime=11 * H)  # down over 07:00
@@ -1056,8 +1056,8 @@ def test_slow_cover_progress_is_not_manual():
         """
 cover.blinds.position :=
     age(manual(cover.blinds)) < 1h -> keep
-    binary_sensor.bathroom_window  -> 30
-    else                           -> 100
+    binary_sensor.bathroom_window  -> 30%
+    else                           -> 100%
 """
     )
     r.h.simulate_devices = False
@@ -1148,3 +1148,31 @@ on sunset:
     r.restart(downtime=2 * H)  # down over sunset (19:00)
     assert r.machine("house") == "evening"  # the missed sunset is still fresh (D17 rule 5)
     assert r.new_calls() == []  # actions don't catch up (D17 rule 4)
+
+
+# ------------------------------------------------------------- percentages (D4)
+
+
+def test_volume_is_compared_as_a_percentage():
+    # HA reports volume from 0 to 1, so 0.2 is 20%: it used to be compared with 30 as is.
+    r = Rig("switch.pump := media_player.tv.volume_level > 30%")
+    assert r.new_calls() == []
+    r.h.set_state("media_player.tv", "on", {"volume_level": 0.4})
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+
+
+def test_brightness_is_compared_as_a_percentage():
+    r = Rig("switch.pump := light.hall.brightness > 40%")
+    r.h.set_state("light.hall", "on", {"brightness": 128})  # 50%
+    assert r.new_calls() == ["switch.turn_on switch.pump"]
+    r.h.set_state("light.hall", "on", {"brightness": 77})  # 30%
+    assert r.new_calls() == ["switch.turn_off switch.pump"]
+
+
+def test_explain_shows_a_scaled_percentage_rounded():
+    from custom_components.homeo.core.explain import explain
+
+    r = Rig("switch.pump := light.hall.brightness > 40%")
+    r.h.set_state("light.hall", "on", {"brightness": 128})
+    (e,) = explain(r.rt, "switch.pump")
+    assert e["values"] == {"light.hall.brightness": "50.2%"}

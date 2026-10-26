@@ -286,7 +286,7 @@ Top-level statements:
 | **State machine** `state mode = "init":` + arms | a named signal that remembers (§13) |
 | **Action** `on <signal>: <service calls>` | imperative escape hatch (notifications etc., §14). Top-level only. |
 
-Value types: `bool`, `number`, `string`, `duration`, `time-of-day`, `timestamp`. Any value can
+Value types: `bool`, `number`, `percentage`, `string`, `duration`, `time-of-day`, `timestamp`. Any value can
 also be `unknown`. Type errors come with hints, e.g.
 *"`input_button.boost` is a timestamp; did you mean `age(input_button.boost) < 30min`?"*
 
@@ -351,7 +351,7 @@ Attribute names that aren't identifiers use `light.hall["rgb color"]`.
 | Literal | Meaning |
 |---|---|
 | `30s`, `5min`, `2h`, `1d`, `1h30min` | durations. `m` is deliberately **not** minutes (it reads like metres). |
-| `50%` | percent. Compared with a `%` sensor, it means 50. As a brightness (`on(brightness: 50%)`) it's sent as `brightness_pct`, and compared with HA's 0–255 `brightness` when read back. |
+| `50%` | a percentage: a unit of its own, like a duration. Anything Home Assistant measures in % is one: sensors and `input_number`s with unit `%`, a light's `brightness` (HA's 0–255, read as 0–100%), media `volume_level` (HA's 0–1), fan `percentage`, cover positions, humidity. Percentages and plain numbers don't mix: `humidity > 60` and `humidity + 5` are errors (write `60%`, `5%`), and settings that take one don't take the other (`brightness: 128`, `kelvin: 50%`). A number scales a percentage (`96% * x`, `x * 96%`, `50% / 2`), and two percentages add, subtract, or divide to a plain number (`60% / 30%` is 2). There's no percentage of a percentage: `50% * 50%` is an error. `x * 1%` turns a number into a percentage, and `p / 1%` the other way. |
 | `07:00`, `22:30` | time of day (in ranges and comparisons), or a time point (§12) |
 | `sunrise`, `sunset`, `sunset - 30min`, `dawn`, `dusk` | solar times (from `sun.sun`) |
 | `mon`…`sun`, `weekday`, `weekend` | days |
@@ -368,7 +368,7 @@ is `unknown`, not an error.
 fan.bathroom := co2 > 800 or humidity > 60%           # → fan.turn_on / fan.turn_off
 light.hall := on(brightness: 80%, kelvin: 2700) if motion else off
 climate.living.temperature := 21 if home else 17      # → climate.set_temperature
-cover.blinds.position := 0 if now in sunset..sunrise else 100
+cover.blinds.position := 0% if now in sunset..sunrise else 100%
 ```
 
 - **`:=` binds (Decided, D2).**

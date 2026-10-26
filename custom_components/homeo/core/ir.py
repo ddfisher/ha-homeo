@@ -106,14 +106,6 @@ class Compare(Node):
 
 
 @dataclass(eq=False, slots=True)
-class Scale(Node):
-    """Multiply a number by a constant factor (e.g. `%` against a 0–255 brightness)."""
-
-    operand: Node = None  # type: ignore[assignment]
-    factor: float = 1.0
-
-
-@dataclass(eq=False, slots=True)
 class Coalesce(Node):
     left: Node = None  # type: ignore[assignment]
     right: Node = None  # type: ignore[assignment]
@@ -234,6 +226,7 @@ class EntityCell(CellDef):
 
     entity_id: str = ""
     attr: str | None = None
+    scale: float = 1.0  # what a percentage HA reports on another scale is multiplied by
 
 
 @dataclass(eq=False, slots=True)
@@ -472,8 +465,6 @@ def node_text(n: Node, brief: bool = False) -> str:
             return f"not {sub(o, PREC['not'])}"
         case Neg(operand=o):
             return f"-{sub(o, PREC['neg'])}"
-        case Scale(operand=o):
-            return node_text(o, brief)  # `%` against a brightness: shown as written
         case BoolOp(op=op, left=a, right=b):
             if (sugar := _sugar(n)) is not None:
                 word, x, d = sugar
@@ -538,8 +529,6 @@ def node_prec(n: Node) -> int:
             return PREC["not"]
         case Neg():
             return PREC["neg"]
-        case Scale(operand=o):
-            return node_prec(o)
         case BoolOp(op=op):
             return PREC["for"] if _sugar(n) is not None else PREC[op]
         case Arith(op=op):
@@ -577,6 +566,12 @@ def const_text(t: T, v: Any) -> str:
         case T.KEEP:
             return "keep"
     return repr(v)
+
+
+def operand_text(n: Node, min_prec: int, brief: bool = False) -> str:
+    """`n`'s text as an operand that needs `min_prec` (printer.PREC), parenthesised if needed."""
+    t = node_text(n, brief)
+    return f"({t})" if node_prec(n) < min_prec else t
 
 
 def cell_text(c: CellDef, brief: bool = False) -> str:
@@ -635,7 +630,7 @@ def _unique(cells: list[CellDef]) -> list[CellDef]:
 
 def children(n: Node) -> list[Node]:
     match n:
-        case Not(operand=o) | Neg(operand=o) | Scale(operand=o):
+        case Not(operand=o) | Neg(operand=o):
             return [o]
         case BoolOp(left=a, right=b) | Arith(left=a, right=b) | Compare(left=a, right=b):
             return [a, b]
@@ -689,11 +684,6 @@ def arm_cells(a: ArmIR | GroupIR) -> list[CellDef]:
     for n in arm_nodes(a):
         out.extend(node_cells(n))
     return out
-
-
-def is_constant(n: Node) -> bool:
-    """A constant, or a constant scaled (`50%` against a brightness), so it has no inputs."""
-    return isinstance(n, Const) or (isinstance(n, Scale) and is_constant(n.operand))
 
 
 def uses_now(n: Node) -> bool:

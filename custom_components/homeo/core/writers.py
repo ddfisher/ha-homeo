@@ -80,6 +80,10 @@ class Writer:
     on_params: dict[str, OnParam] = {}
     follows: bool = False  # can follow a behavior (D23)
 
+    def accepts_for(self, state: EntityState | None) -> tuple[frozenset[T], str]:
+        """The result types this entity takes, and how to describe them."""
+        return self.accepts, self.description
+
     def supports_transition(self, state: EntityState | None) -> bool:
         return False
 
@@ -312,8 +316,10 @@ class ServiceValueWriter(Writer):
         tolerance=None,
         resolution=None,
         bounds=None,
+        percent_unit: bool = False,
     ):
         self.domain = domain
+        self.percent_unit = percent_unit  # takes a percentage when the entity's unit is %
         self.attr = attr
         self.service = service
         self.key = key
@@ -326,6 +332,12 @@ class ServiceValueWriter(Writer):
         self._resolution = resolution
         self._bounds = bounds
         self.follows = resolution is not None
+
+    def accepts_for(self, state: EntityState | None) -> tuple[frozenset[T], str]:
+        unit = state.attributes.get("unit_of_measurement") if state is not None else None
+        if self.percent_unit and unit == "%":
+            return frozenset({T.PERCENT}), "a percentage"
+        return self.accepts, self.description
 
     def calls(self, entity_id: str, value: Any) -> list[ServiceCall]:
         return [ServiceCall(self.domain, self.service, {self.key: self.convert(value)}, entity_id)]
@@ -427,8 +439,8 @@ def build_writers() -> dict[tuple[str, str | None], Writer]:
         "cover",
         "set_cover_position",
         "position",
-        {T.NUMBER, T.PERCENT},
-        "a position from 0 to 100%",
+        {T.PERCENT},
+        "a position from 0% to 100%",
         attr="position",
         read_attr="current_position",
         convert=lambda v: int(round(_num(v))),
@@ -447,6 +459,7 @@ def build_writers() -> dict[tuple[str, str | None], Writer]:
             tolerance=_step_tol("step", 1e-6),
             resolution=_step("step", 1.0),
             bounds=lambda s: _attr_bounds(s, "min", "max"),
+            percent_unit=True,
         )
     for d in ("input_select", "select"):
         w[(d, None)] = ServiceValueWriter(

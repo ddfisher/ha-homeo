@@ -501,13 +501,14 @@ class Runtime:
         raw = st.attributes.get(d.attr)
         if raw is None:
             return UNKNOWN
-        return self._convert(raw, d.type)
+        v = self._convert(raw, d.type)
+        return v.scale(d.scale) if d.scale != 1.0 and isinstance(v, Num) else v
 
     @staticmethod
     def _convert(raw: Any, t: T) -> Any:
         if t == T.BOOL:
             return to_bool(raw)
-        if t == T.NUMBER:
+        if t in (T.NUMBER, T.PERCENT):
             if isinstance(raw, bool):
                 return UNKNOWN
             try:
@@ -636,9 +637,6 @@ class Runtime:
             case ir.Neg(operand=o):
                 v = self._eval(o)
                 return -v if isinstance(v, Num) else UNKNOWN
-            case ir.Scale(operand=o, factor=k):
-                v = self._num(self._eval(o))
-                return v.scale(k) if isinstance(v, Num) else UNKNOWN
             case ir.Arith(op=op, left=a, right=b):
                 x, y = self._num(self._eval(a)), self._num(self._eval(b))
                 if not isinstance(x, Num) or not isinstance(y, Num):

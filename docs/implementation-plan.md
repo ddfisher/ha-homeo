@@ -311,17 +311,22 @@ doesn't count and the next most recent arm wins.
   load (known multi-state domains like `media_player` or `climate` stay strings even when
   `off`);
 - timestamp: `event`, `input_button`, `button`, `scene`, `sensor` with `device_class: timestamp`;
-- number: `input_number`, `number`, `counter`, `sensor` with a `unit_of_measurement` or
-  `state_class`, or whose current state parses as a number;
+- percentage: `sensor`, `input_number` and `number` with `unit_of_measurement: %`;
+- number: `input_number`, `number`, `counter`, `sensor` with another `unit_of_measurement` or
+  a `state_class`, or whose current state parses as a number;
 - string: everything else (`person`, `select`, `climate`, `cover`, `lock`, …);
-- attributes: from the current attribute value's Python type; `any` if absent.
+- attributes: percentages for light `brightness`, fan `percentage`, cover `current_position`
+  and `current_tilt_position`, climate and humidifier `humidity`/`current_humidity`, and media
+  `volume_level`; others from the current attribute value's Python type; `any` if absent.
 - `any` is accepted wherever a specific type is expected, and converted at run time
   (non-convertible → `unknown`, per D4).
 
-**I15. Units.** Units other than `%` are not interpreted: values compare as plain numbers. `50%`
-compares as 50 with numbers, except with a light's `brightness` attribute (0–255), where it's
-scaled (as the design says for read-back). Comparing `%` with a sensor whose unit is something
-else (e.g. `°C`) is a type error with a hint.
+**I15. Units.** Units other than `%` are not interpreted: values compare as plain numbers.
+`percentage` is a type of its own (D4), stored 0–100: attributes HA reports on another scale are
+converted when read (`EntityCell.scale`: brightness × 100/255, `volume_level` × 100). Mixing a
+percentage with a plain number is a type error, with a hint: `write 60%` for a literal, `is
+measured in °C, not %` for a sensor with another unit, else `x * 1%`. `numeric_result` in
+`types.py` holds the arithmetic table; a value typed `any` may be either.
 
 **I16. Arithmetic.** `timestamp − timestamp → duration`; `timestamp ± duration → timestamp`;
 `duration ± duration → duration`; `duration * number`, `duration / number → duration`;
