@@ -1,8 +1,12 @@
+import re
+
 import pytest
 
 from custom_components.homeo.core import ir
 from custom_components.homeo.core.checker import Globals, compile_source
 from custom_components.homeo.core.errors import CompileError
+from custom_components.homeo.core.parser import parse
+from custom_components.homeo.core.printer import sexpr
 from custom_components.homeo.core.types import T
 from custom_components.homeo.core.values import KEEP
 
@@ -241,7 +245,25 @@ on sunset - 30min:
     notify.mobile_app_phone(message: "dusk")
 """,
     )
-    assert "timepoint:07:00" in p.cells and "timepoint:sunset - 30min" in p.cells
+    points = {c.text for c in p.cells.values() if isinstance(c, ir.TimePointCell)}
+    assert points == {"07:00", "sunset - 30min"}
+
+
+def test_time_points_are_keyed_by_value(host):
+    p = ok(
+        host,
+        """
+on sunset - 10min - 5min:
+    notify.mobile_app_phone(message: "a")
+on sunset - (10min - 5min):
+    notify.mobile_app_phone(message: "b")
+on sunset - 15min:
+    notify.mobile_app_phone(message: "c")
+""",
+    )
+    a, b, c = (x.trigger for x in p.actions)
+    assert (a.text, b.text) == ("sunset - 10min - 5min", "sunset - (10min - 5min)")
+    assert a is not b and a is c
 
 
 def test_every(host):
@@ -259,8 +281,8 @@ def test_within_expansion(host):
 
 
 def test_not_keeps_its_parentheses_in_texts(host):
-    # Texts key history cells: `(not m) within 5min` and `not (m within 5min)` mean different
-    # things, so they must not share one (found in review).
+    # `(not m) within 5min` and `not (m within 5min)` mean different things (found in review).
+    # `within` binds tighter than `not`, so the second needs no parentheses.
     p = ok(
         host,
         """
@@ -272,7 +294,7 @@ switch.pump := not (m or binary_sensor.bathroom_window)
     )
     hall, porch, pump = (b.expr for b in p.bindings)
     assert hall.text == "((not binary_sensor.hall_motion) within 5min) for 1min"
-    assert porch.text == "(not (binary_sensor.hall_motion within 5min)) for 1min"
+    assert porch.text == "(not binary_sensor.hall_motion within 5min) for 1min"
     assert pump.text == "not (binary_sensor.hall_motion or binary_sensor.bathroom_window)"
     assert hall.right.left.cell is not porch.right.left.cell
 
@@ -307,7 +329,89 @@ def test_for_expansion(host):
     e = p.bindings[0].expr
     assert e.text == "sensor.lux < 20 for 5min"
     assert isinstance(e, ir.BoolOp) and isinstance(e.right.left, ir.Age)
-    assert e.right.left.cell.key == "expr:sensor.lux < 20"
+    cell = e.right.left.cell
+    assert cell.text == "sensor.lux < 20" and cell.key == f"expr:{ir.structure(cell.expr)}"
+
+
+# The bool entities p, q, r, and blocks over them, for the history-cell tests below.
+_PQR = """
+let p = binary_sensor.hall_motion
+let q = binary_sensor.bathroom_window
+let r = binary_sensor.holiday
+let c1 =
+    p -> on
+    else -> off
+let c2 =
+    q -> on
+    else -> off
+"""
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("(p or q) ?? r", "p or (q ?? r)"),
+        ("(p if q else r) if r else q", "p if q else (r if r else q)"),
+        ("(not p) within 5min", "not (p within 5min)"),
+        ("p and (q and r)", "(p and q) and r"),
+        ("c1", "c2"),  # blocks used to print as just `cascade`
+    ],
+)
+def test_different_expressions_get_different_history_cells(host, first, second):
+    # History cells are keyed by expression structure, not text (found in review).
+    p = ok(host, _PQR + f"light.hall := ({first}) for 1min\nlight.porch := ({second}) for 1min\n")
+    hall, porch = (b.expr.right.left.cell for b in p.bindings)
+    assert hall is not porch and hall.key != porch.key
+    assert hall.text != porch.text
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("p or q", "(p) or ((q))"),
+        ("p or q", "binary_sensor.hall_motion or binary_sensor.bathroom_window"),
+        ("c1", "c1"),
+    ],
+)
+def test_the_same_expression_shares_one_history_cell(host, first, second):
+    p = ok(host, _PQR + f"light.hall := ({first}) for 1min\nlight.porch := ({second}) for 1min\n")
+    hall, porch = (b.expr.right.left.cell for b in p.bindings)
+    assert hall is porch
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "(p or q) ?? r",
+        "p or q ?? r",
+        "(p if q else r) if r else q",
+        "p if q else r if r else q",
+        "p if (q if r else p) else r",
+        "not (p or q)",
+        "(not p) within 5min",
+        "not p within 5min",
+        "(p within 5min) for 1min",
+        "p and (q and r)",
+        "(p and q) and r",
+        "sensor.lux - (sensor.outdoor_temp - 1) > 2 * (3 + sensor.lux)",
+        "-(sensor.lux + 1) < 0",
+        "(sensor.lux ?? 0) + 1 > 5",
+        "(p ?? q) == r",
+        "(sensor.lux > 5) == p",
+        "now in 22:00..06:00 or p",
+        "(p or q) in [on, off]",
+    ],
+)
+def test_texts_read_back_as_the_same_expression(host, src):
+    # A node's text parses to the same tree as its source: no missing or changed parentheses.
+    p = ok(host, _PQR + f"let x = {src}\nlight.hall := x\n")
+    text = p.bindings[0].expr.text
+    names = {"p": "binary_sensor.hall_motion", "q": "binary_sensor.bathroom_window"}
+    names["r"] = "binary_sensor.holiday"
+    want = re.sub(r"\b[pqr]\b", lambda m: names[m.group()], src)
+    assert sexpr(parse(f"let x = {text}").statements[0].value) == sexpr(
+        parse(f"let x = {want}").statements[0].value
+    ), text
 
 
 # ----------------------------------------------------------------- bindings

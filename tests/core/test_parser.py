@@ -295,6 +295,9 @@ def test_design_examples_parse(src):
         "not (a for 1h30min)",
         "humidity > 63% within 30min",
         "not motion within 5min",
+        "(a > 5) == b",
+        "(a == b) in [on, off]",
+        "(a < b) in x..y",
     ],
 )
 def test_to_source_round_trips(src):

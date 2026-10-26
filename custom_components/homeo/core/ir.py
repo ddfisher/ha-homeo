@@ -2,16 +2,19 @@
 
 Expressions (`Node`) are pure functions of cells and the clock. **Cells** (`CellDef`) are the
 things whose history the runtime tracks (implementation plan §2.2). Every node and cell has a
-canonical `text`, built from resolved names (entity ids instead of `let` aliases), which is
-used for messages, `homeo.explain`, and as the key that carries cell state across reloads.
+canonical `text`, built from resolved names (entity ids instead of `let` aliases), for messages
+and `homeo.explain`. A cell's `key` identifies it, and carries its state across reloads; an
+expression's cell is keyed by `structure(expr)`, never by its text.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
+from enum import Enum
 from typing import Any
 
 from .errors import Span
+from .printer import PREC
 from .types import T
 
 # ------------------------------------------------------------------ expressions
@@ -23,6 +26,8 @@ class Node:
     span: Span
     text: str
     moving: bool = False  # value changes continuously with the clock
+    # how tightly `text` binds (printer.PREC), so a parent knows whether to parenthesise it
+    prec: int = field(default=PREC["postfix"], kw_only=True)
 
 
 @dataclass(eq=False, slots=True)
@@ -354,6 +359,38 @@ class Program:
 
 
 # ----------------------------------------------------------------------- helpers
+
+# Fields that only describe how a node was written or displayed, not what it computes.
+_DISPLAY_ONLY = frozenset({"span", "text", "moving", "prec", "source", "cond_source", "implicit"})
+
+
+def structure(x: Any) -> str:
+    """A fully bracketed prefix form of an expression tree, used to key its history cell.
+
+    Two expressions get the same string exactly when they are the same tree: the same node
+    kinds with the same operators, types and constants, over the same cells. The form is
+    bracketed, constants are `repr`s and cell keys are length-prefixed (so a nested key needs
+    no escaping), so no two different trees print alike, whatever their display text looks
+    like. It's generic over dataclass fields, so a new node kind is covered without a
+    matching rule here.
+    """
+    match x:
+        case CellDef():
+            return f"(cell {len(x.key)}:{x.key})"
+        case Enum():
+            return x.name
+        case list() | tuple():
+            return "[" + " ".join(structure(i) for i in x) + "]"
+        case frozenset() | set():
+            return "{" + " ".join(sorted(structure(i) for i in x)) + "}"
+        case dict():
+            return "{" + " ".join(f"{k!r}:{structure(v)}" for k, v in sorted(x.items())) + "}"
+        case _ if is_dataclass(x) and not isinstance(x, type):
+            parts = [
+                structure(getattr(x, f.name)) for f in fields(x) if f.name not in _DISPLAY_ONLY
+            ]
+            return "(" + " ".join([type(x).__name__, *parts]) + ")"
+    return repr(x)
 
 
 def _unique(cells: list[CellDef]) -> list[CellDef]:

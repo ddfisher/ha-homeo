@@ -26,7 +26,7 @@ custom_components/homeo/
     errors.py        Diagnostic (file, line, col, message, hint) + caret formatting
     lexer.py         tokens with line/col and per-line indentation
     ast.py           dataclass AST
-    printer.py       AST back to canonical text (messages, keys)
+    printer.py       AST back to canonical text (messages, explain)
     parser.py        Pratt expressions + layout-aware statements and arm blocks
     types.py         static types
     checker.py       name resolution, type checking, target/writer checks, cycles → Program IR
@@ -138,7 +138,14 @@ The runtime builds a **cell** for each thing whose history matters:
   time points) — shared across files, keyed by what they read;
 - every `let`, state machine, binding and action header;
 - every argument of a history construct (`age`, `fresh`, `latest` conditions, `on`, `previous`,
-  `toggle`, `count`; `for` after expansion).
+  `toggle`, `count`; `for` and `within` after expansion).
+
+An argument's cell is keyed by the **structure** of its checked expression (`ir.structure`: a
+fully bracketed form over node kinds, operators, types, constants and the cells it reads), not by
+its text. Two uses share a cell exactly when they are the same expression after `let`s are
+expanded, however they're parenthesised, so different expressions can never share history.
+Time points are keyed by their value. Display text is printed separately with the parser's
+precedence table, so it always reads back as the same expression.
 
 Everything else is a pure expression evaluated inside the cell that contains it.
 

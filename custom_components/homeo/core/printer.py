@@ -1,15 +1,18 @@
 """Turn AST back into text.
 
-- `to_source` gives canonical, minimally parenthesised source text. It's used in messages,
-  `homeo.explain`, and as a stable key for carrying runtime state across reloads.
+- `to_source` gives canonical, minimally parenthesised source text, for messages and
+  `homeo.explain`. Runtime state is keyed by structure instead (`ir.structure`).
 - `sexpr` gives a fully parenthesised form, handy for tests.
+
+`PREC` is the grammar's precedence levels (higher binds tighter). The checker builds IR display
+text with the same table, so both print the way the parser reads.
 """
 
 from __future__ import annotations
 
 from . import ast as A
 
-_PREC = {
+PREC = {
     "ternary": 1,
     "or": 2,
     "and": 3,
@@ -57,18 +60,18 @@ def fmt_number(v: float) -> str:
 
 def _prec(e: A.Expr) -> int:
     if isinstance(e, A.Ternary):
-        return _PREC["ternary"]
+        return PREC["ternary"]
     if isinstance(e, A.Binary):
         if e.op in _CMP:
-            return _PREC["cmp"]
-        return _PREC[e.op]
+            return PREC["cmp"]
+        return PREC[e.op]
     if isinstance(e, A.Unary):
-        return _PREC["not"] if e.op == "not" else _PREC["neg"]
+        return PREC["not"] if e.op == "not" else PREC["neg"]
     if isinstance(e, (A.For, A.Within)):
-        return _PREC["for"]
+        return PREC["for"]
     if isinstance(e, A.Range):
-        return _PREC["cmp"]
-    return _PREC["postfix"]
+        return PREC["cmp"]
+    return PREC["postfix"]
 
 
 def to_source(e: A.Expr) -> str:
@@ -80,7 +83,7 @@ def to_source(e: A.Expr) -> str:
         case A.Name(id=i):
             return i
         case A.Attr(base=b, name=n, quoted=q):
-            return f'{sub(b, _PREC["postfix"])}["{n}"]' if q else f"{sub(b, _PREC['postfix'])}.{n}"
+            return f'{sub(b, PREC["postfix"])}["{n}"]' if q else f"{sub(b, PREC['postfix'])}.{n}"
         case A.BoolLit(word=w):
             return w
         case A.NumberLit(value=v, percent=p):
@@ -96,25 +99,26 @@ def to_source(e: A.Expr) -> str:
         case A.ListExpr(items=items):
             return "[" + ", ".join(to_source(i) for i in items) + "]"
         case A.Unary(op="not", operand=o):
-            return "not " + sub(o, _PREC["not"])
+            return "not " + sub(o, PREC["not"])
         case A.Unary(op=op, operand=o):
-            return op + sub(o, _PREC["neg"])
+            return op + sub(o, PREC["neg"])
         case A.Binary(op=op, left=l, right=r):
             p = _prec(e)
             if op in ("in", "not in") and isinstance(r, A.Range):
-                return f"{sub(l, p)} {op} {to_source(r)}"
-            # left-associative: the right operand needs strictly higher precedence
-            return f"{sub(l, p)} {op} {sub(r, p + 1)}"
+                return f"{sub(l, p + 1)} {op} {to_source(r)}"
+            # left-associative: the right operand needs strictly higher precedence;
+            # comparisons don't chain, so the left one does too
+            return f"{sub(l, p + 1 if op in _CMP else p)} {op} {sub(r, p + 1)}"
         case A.Range(lo=lo, hi=hi):
-            return f"{sub(lo, _PREC['??'])}..{sub(hi, _PREC['??'])}"
+            return f"{sub(lo, PREC['??'])}..{sub(hi, PREC['??'])}"
         case A.Ternary(then=t, cond=c, otherwise=o):
             return f"{sub(t, 2)} if {sub(c, 2)} else {sub(o, 1)}"
         case A.For(operand=o, duration=d):
-            return f"{sub(o, _PREC['cmp'])} for {sub(d, _PREC['??'])}"
+            return f"{sub(o, PREC['cmp'])} for {sub(d, PREC['??'])}"
         case A.Within(operand=o, duration=d):
-            return f"{sub(o, _PREC['cmp'])} within {sub(d, _PREC['??'])}"
+            return f"{sub(o, PREC['cmp'])} within {sub(d, PREC['??'])}"
         case A.Every(period=p):
-            return f"every {sub(p, _PREC['postfix'])}"
+            return f"every {sub(p, PREC['postfix'])}"
         case A.Call(func=f, args=args, kwargs=kwargs):
             parts = [to_source(a) for a in args] + [
                 f"{k.name}: {to_source(k.value)}" for k in kwargs
