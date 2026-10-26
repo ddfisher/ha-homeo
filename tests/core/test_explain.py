@@ -2,7 +2,7 @@
 
 import pytest
 
-from custom_components.homeo.core.explain import NotFound, explain
+from custom_components.homeo.core.explain import NotFound, explain, value
 
 from .rig import Rig
 
@@ -243,3 +243,38 @@ fan.bathroom := co2 > 800 and not night and day
     night = one(r, "night")
     assert night["values"] == {"now": "08:02:00 (now)", "sunrise": "07:00:00 (1h2min ago)"}
     assert one(r, "day")["values"] == {"today": "mon"}
+
+
+def test_value_for_hover():
+    """The editor's hover asks for one name's value in one file (homeo/value)."""
+    files = {
+        "bath.homeo": FAN + "let boosted = age(input_button.boost) < 30min\n"
+        'state mode = "auto":\n    fresh(input_button.boost) -> "boost"\n',
+        "other.homeo": "let co2 = 1\n",
+    }
+    r = Rig(files)
+    r.h.advance(MIN)
+    r.h.press("input_button.boost")
+    r.h.advance(2 * MIN)
+    assert value(r.rt, "bath.homeo", "co2") == {
+        "kind": "let",
+        "type": "number",
+        "value": "500",
+        "changed": "2026-01-04 08:00:00 (1d3min ago)",
+    }
+    assert value(r.rt, "other.homeo", "co2")["value"] == "1"  # each file has its own names
+    assert value(r.rt, "bath.homeo", "stuffy") == {"kind": "let", "type": "bool", "value": "false"}
+    assert value(r.rt, "bath.homeo", "boosted")["value"] == "true"
+    assert value(r.rt, "bath.homeo", "mode") == {
+        "kind": "state",
+        "type": "string",
+        "value": '"boost"',
+        "changed": "08:01:00 (2min ago)",
+        "entity": "select.homeo_mode",
+    }
+    with pytest.raises(NotFound, match="no `let` or `state` named `mode` in the running"):
+        value(r.rt, "other.homeo", "mode")  # another file's machine
+    with pytest.raises(NotFound, match="no `let` or `state` named `nope`"):
+        value(r.rt, "bath.homeo", "nope")
+    with pytest.raises(NotFound, match="new.homeo isn't running"):
+        value(r.rt, "new.homeo", "co2")

@@ -3,9 +3,12 @@
 import re
 from pathlib import Path
 
+from custom_components.homeo.core.checker import BUILTIN_FUNCS, BUILTIN_NAMES
 from custom_components.homeo.core.writers import WRITERS
 
-COMPLETE_JS = Path(__file__).parents[2] / "frontend" / "src" / "complete.js"
+FRONTEND = Path(__file__).parents[2] / "frontend" / "src"
+COMPLETE_JS = FRONTEND / "complete.js"
+LANGUAGE_JS = FRONTEND / "language.js"
 
 
 def test_on_settings_match_the_writers():
@@ -19,3 +22,16 @@ def test_on_settings_match_the_writers():
         d: set(w.on_params) for (d, attr), w in WRITERS.items() if attr is None and w.on_params
     }
     assert mirrored == actual
+
+
+def test_builtins_match_the_checker():
+    """The highlighter's builtin lists (which hover docs and completion cover; a frontend test
+    checks every one has docs) are exactly the checker's."""
+    js = LANGUAGE_JS.read_text()
+
+    def names(const: str) -> tuple[str, ...]:
+        block = re.search(rf"export const {const} = \[(.*?)\];", js, re.S).group(1)
+        return tuple(re.findall(r'"(\w+)"', block))
+
+    assert names("FUNCTIONS") == BUILTIN_FUNCS
+    assert names("BUILTINS") == BUILTIN_NAMES

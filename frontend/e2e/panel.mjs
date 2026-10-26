@@ -87,6 +87,36 @@ try {
     return false;
   };
 
+  // Hover: docs for builtins and keywords, entity states, and the running values of names
+  const hoverText = async (lineText, token) => {
+    await page.mouse.move(5, 5);
+    await panel.locator(".cm-homeo-hover").waitFor({ state: "detached", timeout: 3000 }).catch(() => {});
+    const at = await panel.evaluate(
+      (el, [lineText, token]) => {
+        const doc = el.view.state.doc.toString();
+        const c = el.view.coordsAtPos(doc.indexOf(token, doc.indexOf(lineText)) + 1);
+        return { x: c.left + 1, y: (c.top + c.bottom) / 2 };
+      },
+      [lineText, token],
+    );
+    await page.mouse.move(at.x, at.y);
+    const tip = panel.locator(".cm-homeo-hover");
+    await tip.waitFor({ timeout: 5000 });
+    return tip.innerText();
+  };
+  let tip = await hoverText("age(manual(fan.ceiling_fan))", "age");
+  check("hover: builtin function", tip.includes("age(x)") && tip.includes("How long since"), tip);
+  tip = await hoverText("bath_mode == \"boost\" for 30min", "for");
+  check("hover: keyword", tip.includes("x for duration"), tip);
+  tip = await hoverText("let co2", "input_number.co2");
+  check("hover: entity state", /state\s+\d/.test(tip), tip);
+  tip = await hoverText("let stuffy", "co2");
+  check("hover: let value", /value\s+\d/.test(tip) && tip.includes("let co2"), tip);
+  await shot("panel-hover");
+  tip = await hoverText("    bath_mode == \"boost\"  ", "bath_mode");
+  check("hover: state machine value", tip.includes("state machine") && tip.includes('"auto"'), tip);
+  await page.mouse.move(5, 5);
+
   // Typing must not trigger HA's keyboard shortcuts (`e`, `c`, `a`, `m` open dialogs).
   await panel.locator(".cm-content").click();
   await page.keyboard.press("Control+End");

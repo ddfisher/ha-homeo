@@ -20,6 +20,7 @@ import { homeoCompletions } from "./complete.js";
 import { diagnosticsToCodeMirror } from "./diagnostics.js";
 import { explanationHtml, prose, statementTarget } from "./explain.js";
 import { validFileName } from "./files.js";
+import { homeoHover } from "./hover.js";
 import { homeoHighlight, homeoLanguage } from "./language.js";
 import { STYLES } from "./styles.js";
 
@@ -219,6 +220,34 @@ class HomeoPanel extends HTMLElement {
           border: "1px solid var(--divider-color)",
         },
         ".cm-diagnostic": { whiteSpace: "pre-wrap" },
+        ".cm-homeo-hover": {
+          maxWidth: "min(440px, 90vw)",
+          padding: "6px 10px",
+          fontFamily: "var(--ha-font-family-body, var(--paper-font-body1_-_font-family, sans-serif))",
+          fontSize: "13px",
+          lineHeight: "1.45",
+        },
+        ".cm-homeo-hover code": {
+          fontFamily: "var(--ha-font-family-code, var(--code-font-family, monospace))",
+          fontSize: "0.95em",
+        },
+        ".cm-homeo-hover .hover-title code": { fontWeight: "600" },
+        ".cm-homeo-hover .hover-kind, .cm-homeo-hover .hover-note, .cm-homeo-hover .hover-key": {
+          color: "var(--secondary-text-color)",
+        },
+        ".cm-homeo-hover .hover-text, .cm-homeo-hover .hover-rows, .cm-homeo-hover .hover-note": {
+          marginTop: "4px",
+        },
+        ".cm-homeo-hover .hover-row": { display: "flex", gap: "1ch" },
+        ".cm-homeo-hover .hover-key": { minWidth: "7ch" },
+        ".cm-homeo-hover .hover-val": { overflowWrap: "anywhere" },
+        ".cm-homeo-hover .hover-example": {
+          margin: "6px 0 0",
+          padding: "4px 6px",
+          whiteSpace: "pre-wrap",
+          backgroundColor: "var(--secondary-background-color, rgba(127, 127, 127, 0.1))",
+          borderRadius: "4px",
+        },
       },
       { dark: !!this._hass?.themes?.darkMode },
     );
@@ -243,6 +272,11 @@ class HomeoPanel extends HTMLElement {
         homeoLanguage,
         homeoHighlight,
         autocompletion({ override: [homeoCompletions(() => this._hass)] }),
+        homeoHover({
+          getHass: () => this._hass,
+          lookup: (name) => this.lookupValue(name),
+          isDirty: () => this.dirty,
+        }),
         check,
         lintGutter(),
         this.themeCompartment.of(this.theme()),
@@ -283,6 +317,16 @@ class HomeoPanel extends HTMLElement {
 
   ws(msg) {
     return this._hass.callWS(msg);
+  }
+
+  /** A `let` or `state` name's value in the running version of the open file, for hovers. */
+  async lookupValue(symbol) {
+    if (!this.current || this.isNew) return { error: "the file isn't saved yet", code: "not_found" };
+    try {
+      return await this.ws({ type: "homeo/value", name: this.current, symbol });
+    } catch (e) {
+      return { error: e?.message ?? String(e), code: e?.code };
+    }
   }
 
   async refreshFiles() {
