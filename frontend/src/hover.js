@@ -103,7 +103,7 @@ function entityInfo(parts, states, now) {
   if (rest.length === 1) {
     const attr = rest[0];
     out.title = `${entityId}.${attr}`;
-    if (attr in st.attributes) out.rows.push([attr, attrText(st.attributes[attr])]);
+    if (Object.hasOwn(st.attributes, attr)) out.rows.push([attr, attrText(st.attributes[attr])]);
     else out.note = `\`${entityId}\` has no attribute \`${attr}\` now.`;
     out.rows.push(["state", shown]);
     return out;
@@ -125,12 +125,24 @@ function serviceInfo(domain, name, services, entityId) {
   };
 }
 
+/** A line without its comment (a `#` inside a string isn't one). */
+export function withoutComment(lineText) {
+  const stream = new StringStream(lineText, 4, 4);
+  const state = homeoStream.startState();
+  while (!stream.eol()) {
+    stream.start = stream.pos;
+    if (homeoStream.token(stream, state) === "comment") return lineText.slice(0, stream.start);
+    if (stream.pos === stream.start) stream.next(); // never stall
+  }
+  return lineText;
+}
+
 /** The `let` and `state` names this file defines, with each one's first line. */
 export function definitions(docText) {
-  const out = {};
+  const out = Object.create(null); // keyed by names from the file: no `constructor` etc.
   for (const m of docText.matchAll(/^(let|state)\s+([A-Za-z_]\w*)[^\n]*/gm)) {
     // the first line, without a comment or the spaces that align `=` with neighbouring lines
-    const line = m[0].replace(/\s+#.*$/, "").trim().replace(/^(\S+\s+\w+)\s+=\s+/, "$1 = ");
+    const line = withoutComment(m[0]).trim().replace(/^(\S+\s+\w+)\s+=\s+/, "$1 = ");
     out[m[2]] ??= { kind: m[1], line };
   }
   return out;
@@ -288,7 +300,7 @@ export function homeoHover({ getHass, lookup, staleness }) {
     const found = describe(view.state.doc, ch, hass);
     if (!found) return null;
     const info = { ...found.info };
-    if (info.title in SOLAR_ATTRS) info.rows = builtinRows(info.title, hass?.states ?? {}, new Date());
+    if (Object.hasOwn(SOLAR_ATTRS, info.title)) info.rows = builtinRows(info.title, hass?.states ?? {}, new Date());
     if (info.lookup) Object.assign(info, valueRows(await lookup(info.lookup), { stale: staleness() }));
     return {
       pos: found.from,

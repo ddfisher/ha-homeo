@@ -86,8 +86,8 @@ export const DOCS = {
   // ---------------------------------------------------------------- names
   now: {
     sig: "now",
-    kind: "time of day",
-    text: "The current time of day. Compare it with times, or test it against a range.",
+    kind: "timestamp",
+    text: "The current time. Compare it with times of day, or test it against a range of them.",
     example: "now in 22:00..06:00",
   },
   today: {
