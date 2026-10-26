@@ -4,10 +4,10 @@ import { HighlightStyle, StreamLanguage, syntaxHighlighting } from "@codemirror/
 import { tags as t } from "@lezer/highlight";
 
 export const KEYWORDS = [
-  "let", "state", "on", "off", "true", "false", "and", "or", "not", "if", "else", "in", "for",
+  "let", "state", "on", "off", "true", "false", "and", "or", "not", "if", "else", "in", "for", "within",
   "keep", "latest", "every",
 ];
-const CONTROL = new Set(["let", "state", "if", "else", "for", "latest", "every", "and", "or", "not", "in"]);
+const CONTROL = new Set(["let", "state", "if", "else", "for", "within", "latest", "every", "and", "or", "not", "in"]);
 const ATOMS = new Set(["on", "off", "true", "false", "keep"]);
 export const FUNCTIONS = ["age", "fresh", "previous", "toggle", "count", "manual", "available"];
 export const BUILTINS = [

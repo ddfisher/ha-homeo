@@ -37,6 +37,20 @@ test("binding line", () => {
   ]);
 });
 
+test("for and within", () => {
+  assert.deepEqual(tokens("    motion within 5min or lux < 20 for 2min"), [
+    ["motion", "variable"],
+    ["within", "keyword"],
+    ["5min", "number"],
+    ["or", "keyword"],
+    ["lux", "variable"],
+    ["<", "operator"],
+    ["20", "number"],
+    ["for", "keyword"],
+    ["2min", "number"],
+  ]);
+});
+
 test("literals and builtins", () => {
   assert.deepEqual(tokens('    age(input_button.boost) < 1h30min -> on(brightness: 10%)'), [
     ["age", "builtinFunction"],

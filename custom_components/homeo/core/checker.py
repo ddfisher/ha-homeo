@@ -544,17 +544,29 @@ class Checker:
                     a,
                     b,
                 )
-            case A.For(operand=o, duration=d):
-                x = self.want_bool(self.resolve(o, ctx), "`for`")
-                dur = self.const_duration(self.resolve(d, ctx), "`for`")
-                cell = self.history_cell(x, "`for`")
+            case A.For(operand=o, duration=d) | A.Within(operand=o, duration=d):
+                # D11: `x for D` = `x and age(x) >= D`; `x within D` = `x or age(x) < D`
+                within = isinstance(e, A.Within)
+                word = "within" if within else "for"
+                x = self.want_bool(
+                    self.resolve(o, ctx), f"`{word}`", self.sugar_timestamp_hint(o, d, within)
+                )
+                dur = self.const_duration(self.resolve(d, ctx), f"`{word}`")
+                cell = self.history_cell(x, f"`{word}`")
                 read = ir.Read(T.BOOL, o.span, cell.text, False, cell)
                 age = ir.Age(T.DURATION, e.span, f"age({cell.text})", True, cell)
+                op = "<" if within else ">="
                 cmp = ir.Compare(
-                    T.BOOL, e.span, f"age({cell.text}) >= {dur.text}", False, ">=", age, dur
+                    T.BOOL, e.span, f"age({cell.text}) {op} {dur.text}", False, op, age, dur
                 )
                 return ir.BoolOp(
-                    T.BOOL, e.span, f"{self.paren(x)} for {dur.text}", False, "and", read, cmp
+                    T.BOOL,
+                    e.span,
+                    f"{self.paren(x)} {word} {dur.text}",
+                    False,
+                    "or" if within else "and",
+                    read,
+                    cmp,
                 )
             case A.Every(period=p):
                 dur = self.const_duration(self.resolve(p, ctx), "`every`")
@@ -596,14 +608,14 @@ class Checker:
             return f"({n.text})"
         return n.text
 
-    def want_bool(self, n: ir.Node, what: str) -> ir.Node:
+    def want_bool(self, n: ir.Node, what: str, timestamp_hint: str | None = None) -> ir.Node:
         if n.type in (T.BOOL, T.ANY):
             return n
         if n.type == T.TIMESTAMP:
             self.fail(
                 f"`{n.text}` is a timestamp, but {what} needs a condition",
                 n.span,
-                f"did you mean `age({n.text}) < 30min`?",
+                timestamp_hint or f"did you mean `age({n.text}) < 30min`?",
             )
         if n.type == T.TIMEOFDAY:
             self.fail(
@@ -619,6 +631,16 @@ class Checker:
             )
         self.fail(f"{what} needs a condition, but `{n.text}` is {article(n.type)}", n.span)
         raise AssertionError
+
+    @staticmethod
+    def sugar_timestamp_hint(operand: A.Expr, duration: A.Expr, within: bool) -> str:
+        """`for`/`within` take conditions; for a timestamp (a button, `manual()`), say what to
+        write instead, with the duration as written."""
+        x, d = to_source(operand), to_source(duration)
+        recent = f"`age({x}) < {d}` for 'happened in the last {d}'"
+        if within:
+            return f"use {recent}"
+        return f"use {recent}, or `age({x}) >= {d}` for 'hasn't happened for {d}'"
 
     def const_duration(self, n: ir.Node, what: str) -> ir.Const:
         if not isinstance(n, ir.Const) or n.type != T.DURATION:

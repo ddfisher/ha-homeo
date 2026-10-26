@@ -112,6 +112,33 @@ def test_change_times_skip_dropouts():
     assert r.new_calls() == ["light.turn_on light.porch"]  # dropout didn't restart the 5 min
 
 
+def test_within():
+    # D11: `x within D` = `x or age(x) < D`: true now, or until less than D ago
+    r = Rig("light.hall := binary_sensor.hall_motion within 5min")
+    r.h.advance(MIN)
+    r.h.set_state("binary_sensor.hall_motion", "on")
+    assert r.new_calls() == ["light.turn_on light.hall"]
+    r.h.advance(10 * MIN)  # still true while it's on
+    assert r.new_calls() == []
+    r.h.set_state("binary_sensor.hall_motion", "off")
+    r.h.advance(5 * MIN - 1)
+    assert r.new_calls() == []
+    r.h.advance(1)  # exactly 5 min after it turned off
+    assert r.new_calls() == ["light.turn_off light.hall"]
+
+
+def test_within_after_a_restart_waits_before_deciding():
+    # A change from before the restart could have been just before it: unknown for D, then
+    # false, so a reboot doesn't switch the light on (D17 rule 2)
+    r = Rig("light.hall := binary_sensor.hall_motion within 10min")
+    r.h.set_state("light.hall", "on")
+    r.restart(downtime=60)
+    r.h.advance(10 * MIN - 1)
+    assert r.new_calls() == []
+    r.h.advance(1)
+    assert r.new_calls() == ["light.turn_off light.hall"]
+
+
 def test_coalesce_and_available():
     r = Rig("switch.pump := (sensor.bathroom_co2 ?? 0) > 800 or not available(sensor.lux)")
     r.h.set_state("sensor.lux", "unavailable")

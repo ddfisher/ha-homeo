@@ -3,9 +3,17 @@
 import re
 from pathlib import Path
 
+from custom_components.homeo.core.lexer import KEYWORDS
 from custom_components.homeo.core.writers import WRITERS
 
 COMPLETE_JS = Path(__file__).parents[2] / "frontend" / "src" / "complete.js"
+LANGUAGE_JS = Path(__file__).parents[2] / "frontend" / "src" / "language.js"
+
+
+def test_keywords_match_the_lexer():
+    js = LANGUAGE_JS.read_text()
+    block = re.search(r"export const KEYWORDS = \[(.*?)\];", js, re.S).group(1)
+    assert set(re.findall(r'"(\w+)"', block)) == set(KEYWORDS)
 
 
 def test_on_settings_match_the_writers():

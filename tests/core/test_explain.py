@@ -243,3 +243,19 @@ fan.bathroom := co2 > 800 and not night and day
     night = one(r, "night")
     assert night["values"] == {"now": "08:02:00 (now)", "sunrise": "07:00:00 (1h2min ago)"}
     assert one(r, "day")["values"] == {"today": "mon"}
+
+
+def test_within_shows_its_expansion():
+    r = Rig("light.hall := binary_sensor.hall_motion within 5min\n")
+    r.h.advance(MIN)
+    r.h.set_state("binary_sensor.hall_motion", "on")
+    r.h.advance(MIN)
+    r.h.set_state("binary_sensor.hall_motion", "off")
+    r.h.advance(2 * MIN)
+    (e,) = explain(r.rt, "light.hall")
+    assert e["result"] == "on"
+    assert e["values"] == {
+        "binary_sensor.hall_motion": False,
+        "age(binary_sensor.hall_motion) < 5min": True,
+        "age(binary_sensor.hall_motion)": "2min",
+    }

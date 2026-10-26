@@ -103,6 +103,14 @@ class For(Expr):
 
 
 @dataclass(slots=True)
+class Within(Expr):
+    """`x within D` (sugar for `x or age(x) < D`, D11): true now, or until less than D ago."""
+
+    operand: Expr
+    duration: Expr
+
+
+@dataclass(slots=True)
 class Every(Expr):
     period: Expr
 

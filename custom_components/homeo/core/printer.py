@@ -64,7 +64,7 @@ def _prec(e: A.Expr) -> int:
         return _PREC[e.op]
     if isinstance(e, A.Unary):
         return _PREC["not"] if e.op == "not" else _PREC["neg"]
-    if isinstance(e, A.For):
+    if isinstance(e, (A.For, A.Within)):
         return _PREC["for"]
     if isinstance(e, A.Range):
         return _PREC["cmp"]
@@ -111,6 +111,8 @@ def to_source(e: A.Expr) -> str:
             return f"{sub(t, 2)} if {sub(c, 2)} else {sub(o, 1)}"
         case A.For(operand=o, duration=d):
             return f"{sub(o, _PREC['cmp'])} for {sub(d, _PREC['??'])}"
+        case A.Within(operand=o, duration=d):
+            return f"{sub(o, _PREC['cmp'])} within {sub(d, _PREC['??'])}"
         case A.Every(period=p):
             return f"every {sub(p, _PREC['postfix'])}"
         case A.Call(func=f, args=args, kwargs=kwargs):
@@ -153,6 +155,8 @@ def sexpr(e: A.Expr | A.Arm | A.Group) -> str:
             return f"(if {sexpr(c)} {sexpr(t)} {sexpr(o)})"
         case A.For(operand=o, duration=d):
             return f"(for {sexpr(o)} {sexpr(d)})"
+        case A.Within(operand=o, duration=d):
+            return f"(within {sexpr(o)} {sexpr(d)})"
         case A.Every(period=p):
             return f"(every {sexpr(p)})"
         case A.Call(func=f, args=args, kwargs=kwargs):

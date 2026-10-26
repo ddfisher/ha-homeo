@@ -249,6 +249,31 @@ def test_every(host):
     assert p.cells["every:900"].period == 900
 
 
+def test_within_expansion(host):
+    p = ok(host, "light.porch := binary_sensor.hall_motion within 5min")
+    e = p.bindings[0].expr
+    assert e.text == "binary_sensor.hall_motion within 5min"
+    assert isinstance(e, ir.BoolOp) and e.op == "or"
+    assert isinstance(e.right, ir.Compare) and e.right.op == "<"
+    assert e.right.text == "age(binary_sensor.hall_motion) < 5min"
+
+
+def test_for_and_within_take_conditions(host):
+    d = err(host, "light.porch := input_button.boost for 5min")
+    assert d.message == "`input_button.boost` is a timestamp, but `for` needs a condition"
+    assert d.hint == (
+        "use `age(input_button.boost) < 5min` for 'happened in the last 5min', "
+        "or `age(input_button.boost) >= 5min` for 'hasn't happened for 5min'"
+    )
+    d = err(host, "light.porch := manual(light.porch) within 1h")
+    assert d.message == "`manual(light.porch)` is a timestamp, but `within` needs a condition"
+    assert d.hint == "use `age(manual(light.porch)) < 1h` for 'happened in the last 1h'"
+    d = err(host, "light.porch := sensor.lux within 5min")
+    assert d.message == "`within` needs a condition, but `sensor.lux` is a number"
+    d = err(host, "light.porch := binary_sensor.hall_motion within sensor.lux")
+    assert "`within` needs a fixed duration" in d.message
+
+
 def test_for_expansion(host):
     p = ok(host, "light.porch := sensor.lux < 20 for 5min")
     e = p.bindings[0].expr
