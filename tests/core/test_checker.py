@@ -309,7 +309,34 @@ def test_unknown_on_setting(host):
 
 
 def test_brightness_needs_percent(host):
-    assert "takes a percentage" in err(host, "light.hall := on(brightness: 128)").message
+    d = err(host, "light.hall := on(brightness: 128)")
+    assert "takes a percentage" in d.message and d.hint is None
+
+
+def test_number_times_percent_hints_to_put_the_percent_first(host):
+    # The hint quotes the source, with `let` names, and keeps the parentheses it needs.
+    src = """
+let start = 19:00
+let ramp = 100% - (age(start) / 3h) * 96%
+light.hall := on(brightness: ramp)
+"""
+    d = err(host, src)
+    assert "takes a percentage" in d.message
+    assert d.hint == (
+        "`age(start) / 3h * 96%` is a number, not a percentage: a percentage stays one only "
+        "when it comes first. Write `96% * (age(start) / 3h)`"
+    )
+    ok(host, "light.hall := on(brightness: 100% - 96% * (age(19:00) / 3h))")
+
+
+def test_volume_hints_to_put_the_percent_first(host):
+    d = err(host, "media_player.tv.volume := 50% - age(19:00) / 1h * 10%")
+    assert "Write `10% * (age(19:00) / 1h)`" in d.hint
+
+
+def test_no_percent_order_hint_when_swapping_would_not_help(host):
+    # `5 + …` is a number whichever way the product is written.
+    assert err(host, "light.hall := on(brightness: 5 + age(19:00) / 1h * 10%)").hint is None
 
 
 def test_on_spec_not_for_switch(host):
