@@ -439,7 +439,7 @@ class _Explainer:
                 return self.fmt_time(v)
             unit = "%" if t == T.PERCENT else ""
             if v.lo == v.hi and math.isfinite(v.lo):
-                x = round(v.lo, 6)
+                x = round(v.lo, 2 if t == T.PERCENT else 6)  # brightness is 128/255 = 50.2%
                 x = int(x) if x == int(x) else x
                 if v.rlo == v.rhi and v.rlo != 0:
                     return f"{x:g}{unit}, {self.fmt_rate(v.rlo, unit)}"  # a behavior (D23)

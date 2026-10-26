@@ -79,14 +79,6 @@ class Compare(Node):
 
 
 @dataclass(eq=False, slots=True)
-class Scale(Node):
-    """Multiply a number by a constant factor (e.g. `%` against a 0–255 brightness)."""
-
-    operand: Node = None  # type: ignore[assignment]
-    factor: float = 1.0
-
-
-@dataclass(eq=False, slots=True)
 class Coalesce(Node):
     left: Node = None  # type: ignore[assignment]
     right: Node = None  # type: ignore[assignment]
@@ -200,6 +192,7 @@ class EntityCell(CellDef):
 
     entity_id: str = ""
     attr: str | None = None
+    scale: float = 1.0  # what a percentage HA reports on another scale is multiplied by
 
 
 @dataclass(eq=False, slots=True)
@@ -368,7 +361,7 @@ def _unique(cells: list[CellDef]) -> list[CellDef]:
 
 def children(n: Node) -> list[Node]:
     match n:
-        case Not(operand=o) | Neg(operand=o) | Scale(operand=o):
+        case Not(operand=o) | Neg(operand=o):
             return [o]
         case BoolOp(left=a, right=b) | Arith(left=a, right=b) | Compare(left=a, right=b):
             return [a, b]

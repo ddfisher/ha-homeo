@@ -110,10 +110,18 @@ let raw = event.bathroom_remote["event_type"] == "press"
     assert "attr:event.bathroom_remote.event_type" in p.cells
 
 
-def test_percent_against_brightness_is_scaled(host):
+def test_brightness_is_read_as_a_percentage(host):
     p = ok(host, "let b = light.hall.brightness > 50%\nlight.porch := b\n")
     cmp = p.bindings[0].expr
-    assert cmp.right.value.lo == pytest.approx(127.5)
+    assert cmp.left.type == T.PERCENT and cmp.left.cell.scale == pytest.approx(100 / 255)
+    assert cmp.right.value.lo == 50
+
+
+def test_volume_is_read_as_a_percentage(host):
+    # HA reports volume from 0 to 1; it used to be compared with 30, so it was never true.
+    p = ok(host, "let v = media_player.tv.volume_level > 30%\nlight.porch := v\n")
+    left = p.bindings[0].expr.left
+    assert left.type == T.PERCENT and left.cell.scale == 100
 
 
 def test_unknown_event_type(host):
@@ -147,7 +155,8 @@ def test_bool_vs_quoted_on(host):
 
 def test_percent_vs_other_unit(host):
     d = err(host, "let x = sensor.outdoor_temp > 50%")
-    assert "measured in °C" in d.message
+    assert "can't order a number and a percentage" in d.message
+    assert d.hint == "`sensor.outdoor_temp` is measured in °C, not %"
 
 
 def test_percent_vs_percent_sensor(host):
@@ -194,7 +203,9 @@ let level =
 """
     assert "changes continuously" in err(host, src + "let x = age(level) > 1h").message
     assert "changes continuously" in err(host, src + "let x = previous(level)").message
-    assert "two values that both change" in err(host, src + "let x = level * level").message
+    assert (
+        "two values that both change" in err(host, src + "let x = level * (level / 100%)").message
+    )
 
 
 def test_age_of_moving_value_rejected(host):
@@ -310,7 +321,7 @@ def test_unknown_on_setting(host):
 
 def test_brightness_needs_percent(host):
     d = err(host, "light.hall := on(brightness: 128)")
-    assert "takes a percentage" in d.message and d.hint is None
+    assert "takes a percentage" in d.message and d.hint == "write `128%`"
 
 
 def test_a_product_with_a_percentage_is_one_in_either_order(host):
@@ -326,18 +337,67 @@ light.hall := on(brightness: ramp)
     ok(host, "media_player.tv.volume := 2 * 25%")  # two constants, folded
 
 
-def test_adding_a_number_or_dividing_by_a_percentage_gives_a_number(host):
-    for expr in ("5 + age(19:00) / 1h * 10%", "age(19:00) / 1h / 10%"):
-        d = err(host, f"light.hall := on(brightness: {expr})")
-        assert "takes a percentage" in d.message
+@pytest.mark.parametrize(
+    "src, hint",
+    [
+        ("sensor.bathroom_humidity + 5", "write `5%`"),
+        ("sensor.bathroom_humidity - sensor.outdoor_temp", "measured in °C"),
+        (
+            "sensor.bathroom_humidity + count(binary_sensor.hall_motion, 1h)",
+            "* 1%` turns it into a percentage",
+        ),
+        ("sensor.bathroom_humidity * 50%", "`sensor.bathroom_humidity * 0.5`"),
+        ("10 / sensor.bathroom_humidity", None),
+        ("5min * 50%", None),
+    ],
+)
+def test_percentages_dont_mix_with_plain_numbers(host, src, hint):
+    d = err(host, f"let x = {src}")
+    assert d.message.startswith("can't apply")
+    assert (d.hint is None) if hint is None else (hint in d.hint)
 
 
-def test_number_times_percent_against_brightness_is_scaled(host):
-    p = ok(host, "let b = light.hall.brightness > 2 * 25%\nlight.porch := b\n")
-    assert p.bindings[0].expr.right.value.lo == pytest.approx(127.5)
+def test_percentages_and_plain_numbers_convert_with_1_percent(host):
+    p = ok(host, "let r = sensor.bathroom_humidity / 50%\nlet q = r * 1%\nlight.porch := q > 1%")
+    assert p.bindings[0].expr.left.type == T.PERCENT
+
+
+def test_a_percentage_is_not_a_number_or_the_other_way_round(host):
+    assert "can't order" in err(host, "let x = sensor.bathroom_humidity > 60").message
+    assert err(host, "let x = sensor.bathroom_humidity > 60").hint == "write `60%`"
+    assert "takes a number" in err(host, "light.hall := on(kelvin: 50%)").message
+    assert "takes a number" in err(host, "input_number.target := 50%").message
+    assert "can't compare" in err(host, "let x = sensor.lux in [10%, 20%]").message
+    d = err(host, "let x = 10 if sensor.lux > 5 else 10%")
+    assert "number" in d.message and "percentage" in d.message
+
+
+def test_percent_sensors_and_attributes_are_percentages(host):
+    for read in (
+        "sensor.bathroom_humidity",
+        "fan.bathroom.percentage",
+        "cover.blinds.current_position",
+        "climate.living.current_humidity",
+    ):
+        ok(host, f"let x = {read} > 50%")
+
+
+def test_number_entity_with_percent_unit_takes_a_percentage():
+    h = standard_world()
+    h.set_state(
+        "input_number.level",
+        "40",
+        {"min": 0, "max": 100, "step": 1, "unit_of_measurement": "%"},
+        notify=False,
+    )
+    ok(h, "input_number.level := 50%\nlight.porch := input_number.level > 30%")
+    d = err(h, "input_number.level := 50")
+    assert "takes a percentage" in d.message and d.hint == "write `50%`"
+
+
+def test_brightness_against_a_moving_percentage(host):
     src = "let b = light.hall.brightness > age(19:00) / 1h * 25%\nlight.porch := b\n"
-    right = ok(host, src).bindings[0].expr.right
-    assert isinstance(right, ir.Scale) and right.factor == 2.55
+    assert ok(host, src).bindings[0].expr.right.type == T.PERCENT
 
 
 def test_on_spec_not_for_switch(host):

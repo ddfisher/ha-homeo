@@ -44,18 +44,27 @@ NUMBER_DOMAINS = frozenset("input_number number counter".split())
 
 # Attributes that may be absent from the current state (e.g. a light that's off).
 KNOWN_ATTRS: dict[tuple[str, str], T] = {
-    ("light", "brightness"): T.NUMBER,
+    ("light", "brightness"): T.PERCENT,
     ("light", "color_temp_kelvin"): T.NUMBER,
-    ("fan", "percentage"): T.NUMBER,
+    ("fan", "percentage"): T.PERCENT,
     ("climate", "temperature"): T.NUMBER,
     ("climate", "current_temperature"): T.NUMBER,
     ("climate", "target_temp_high"): T.NUMBER,
     ("climate", "target_temp_low"): T.NUMBER,
-    ("climate", "current_humidity"): T.NUMBER,
+    ("climate", "humidity"): T.PERCENT,
+    ("climate", "current_humidity"): T.PERCENT,
     ("climate", "hvac_action"): T.STRING,
-    ("cover", "current_position"): T.NUMBER,
-    ("cover", "current_tilt_position"): T.NUMBER,
-    ("media_player", "volume_level"): T.NUMBER,
+    ("cover", "current_position"): T.PERCENT,
+    ("cover", "current_tilt_position"): T.PERCENT,
+    ("humidifier", "humidity"): T.PERCENT,
+    ("humidifier", "current_humidity"): T.PERCENT,
+    ("media_player", "volume_level"): T.PERCENT,
+}
+
+# Percentage attributes that Home Assistant reports on another scale: what to multiply by.
+PERCENT_SCALES: dict[tuple[str, str], float] = {
+    ("light", "brightness"): 100 / 255,
+    ("media_player", "volume_level"): 100.0,
 }
 
 BUILTIN_FUNCS = ("age", "fresh", "previous", "toggle", "count", "manual", "available")
@@ -129,7 +138,8 @@ def infer_entity_type(entity_id: str, state: EntityState | None) -> T:
     if domain in TIMESTAMP_DOMAINS:
         return T.TIMESTAMP
     if domain in NUMBER_DOMAINS:
-        return T.NUMBER
+        unit = state.attributes.get("unit_of_measurement") if state is not None else None
+        return T.PERCENT if unit == "%" else T.NUMBER
     if (
         (domain == "group" or domain not in KNOWN_DOMAINS)
         and state is not None
@@ -143,6 +153,8 @@ def infer_entity_type(entity_id: str, state: EntityState | None) -> T:
         attrs = state.attributes
         if attrs.get("device_class") == "timestamp":
             return T.TIMESTAMP
+        if attrs.get("unit_of_measurement") == "%":
+            return T.PERCENT
         if attrs.get("unit_of_measurement") is not None or attrs.get("state_class") is not None:
             return T.NUMBER
         try:
@@ -385,7 +397,15 @@ class Checker:
             f'{entity_id}["{attr}"]' if quoted or not attr.isidentifier() else f"{entity_id}.{attr}"
         )
         cell = self.cell(
-            ir.EntityCell(f"attr:{entity_id}.{attr}", t, text, span, entity_id=entity_id, attr=attr)
+            ir.EntityCell(
+                f"attr:{entity_id}.{attr}",
+                t,
+                text,
+                span,
+                entity_id=entity_id,
+                attr=attr,
+                scale=PERCENT_SCALES.get((domain, attr), 1.0),
+            )
         )
         return ir.Read(t, span, text, False, cell)
 
@@ -669,13 +689,14 @@ class Checker:
                 text = f"{a.text} {op} {b.text}"
                 return ir.Const(T.TIMEOFDAY, span, text, False, a.value.shifted(delta))
             self.fail("a time of day can only be shifted by a fixed duration", span)
+        scalar = (T.NUMBER, T.ANY)  # what a duration can be scaled by
         if num(ta) and num(tb):
             result = numeric_result(op, ta, tb)
         elif ta == T.DURATION and tb == T.DURATION:
             result = T.DURATION if op in "+-" else (T.NUMBER if op == "/" else None)
-        elif ta == T.DURATION and num(tb) and op in "*/":
+        elif ta == T.DURATION and tb in scalar and op in "*/":
             result = T.DURATION
-        elif num(ta) and tb == T.DURATION and op == "*":
+        elif ta in scalar and tb == T.DURATION and op == "*":
             result = T.DURATION
         elif ta == T.TIMESTAMP and tb == T.TIMESTAMP and op == "-":
             result = T.DURATION
@@ -684,7 +705,11 @@ class Checker:
         elif ta == T.DURATION and tb == T.TIMESTAMP and op == "+":
             result = T.TIMESTAMP
         if result is None:
-            self.fail(f"can't apply `{op}` to {article(ta)} and {article(tb)}", span)
+            self.fail(
+                f"can't apply `{op}` to {article(ta)} and {article(tb)}",
+                span,
+                self.percent_arith_hint(op, a, b),
+            )
         if op in "*/" and a.moving and b.moving:
             self.fail(f"can't apply `{op}` to two values that both change with the clock", span)
         if op == "/" and b.moving:
@@ -701,6 +726,36 @@ class Checker:
             }[op]()
             return ir.Const(result, span, text, False, value)
         return ir.Arith(result, span, text, a.moving or b.moving, op, a, b)
+
+    def percent_arith_hint(self, op: str, a: ir.Node, b: ir.Node) -> str | None:
+        """Why a number and a percentage don't combine with `op`, and what to write instead."""
+        types = (a.type, b.type)
+        if op in "+-" and set(types) == {T.NUMBER, T.PERCENT}:
+            return self.as_percent_hint(a if a.type == T.NUMBER else b)
+        if op == "*" and types == (T.PERCENT, T.PERCENT):
+            for x, k in ((a, b), (b, a)):
+                if isinstance(k, ir.Const) and isinstance(k.value, Num) and k.value.exact:
+                    return f"scale by a plain number instead: `{self.paren_arith(x)} * {k.value.lo / 100:g}`"
+            return "there's no percentage of a percentage: scale by a plain number, e.g. `* 0.5`"
+        return None
+
+    def as_percent_hint(self, n: ir.Node) -> str:
+        """For a plain number `n` used where a percentage is needed."""
+        if isinstance(n, ir.Const) and isinstance(n.value, Num) and n.value.exact:
+            return f"write `{n.value.lo:g}%`"
+        unit = self.unit_of(n)
+        if unit is not None:
+            return f"`{n.text}` is measured in {unit}, not %"
+        return f"`{self.paren_arith(n)} * 1%` turns it into a percentage"
+
+    def unit_of(self, n: ir.Node) -> str | None:
+        """The unit an entity's state is measured in, if `n` reads one that has a unit."""
+        if not (isinstance(n, ir.Read) and isinstance(n.cell, ir.EntityCell)):
+            return None
+        if n.cell.attr is not None:
+            return None
+        st = self.entity_state(n.cell.entity_id)
+        return st.attributes.get("unit_of_measurement") if st else None
 
     @staticmethod
     def paren_arith(n: ir.Node) -> str:
@@ -765,7 +820,6 @@ class Checker:
                     span,
                     self.compare_hint(a, b),
                 )
-        a, b = self.percent_scale(a, b), self.percent_scale(b, a)
         return ir.Compare(T.BOOL, span, text, False, op, a, b)
 
     def compare_hint(self, a: ir.Node, b: ir.Node) -> str | None:
@@ -779,6 +833,8 @@ class Checker:
                 return f"`{x.text}` is on/off: write `{x.text}` or `not {x.text}`, or compare with `{y.value}` without quotes"
             if x.type == T.TIMESTAMP and y.type == T.DURATION:
                 return f"did you mean `age({x.text})`?"
+            if x.type == T.PERCENT and y.type == T.NUMBER:
+                return self.as_percent_hint(y)
         return None
 
     def check_string_literal(self, x: ir.Node, lit: ir.Node) -> None:
@@ -802,28 +858,6 @@ class Checker:
                     lit.span,
                     did_you_mean(value, [str(o) for o in options]),
                 )
-
-    def percent_scale(self, p: ir.Node, other: ir.Node) -> ir.Node:
-        """`%` against a light's 0–255 brightness is scaled; against other units it's an error."""
-        if p.type != T.PERCENT or not isinstance(other, ir.Read):
-            return p
-        cell = other.cell
-        if not isinstance(cell, ir.EntityCell):
-            return p
-        if cell.attr == "brightness" and cell.entity_id.startswith("light."):
-            if isinstance(p, ir.Const):
-                return ir.Const(T.NUMBER, p.span, p.text, False, p.value.scale(2.55))
-            return ir.Scale(T.NUMBER, p.span, p.text, p.moving, p, 2.55)
-        if cell.attr is None:
-            st = self.entity_state(cell.entity_id)
-            unit = st.attributes.get("unit_of_measurement") if st else None
-            if unit is not None and unit != "%":
-                self.fail(
-                    f"`{cell.entity_id}` is measured in {unit}, not %",
-                    p.span,
-                    f"compare it with a plain number, e.g. `{cell.entity_id} > 20`",
-                )
-        return p
 
     def membership(self, negate: bool, lhs: A.Expr, r: A.Expr, span: Span, ctx: _Ctx) -> ir.Node:
         x = self.resolve(lhs, ctx)
@@ -873,7 +907,11 @@ class Checker:
         items = [self.resolve(i, ctx) for i in r.items]
         for it in items:
             if join(x.type, it.type) is None or it.type == T.KEEP:
-                self.fail(f"can't compare {article(x.type)} with {article(it.type)}", it.span)
+                self.fail(
+                    f"can't compare {article(x.type)} with {article(it.type)}",
+                    it.span,
+                    self.compare_hint(x, it),
+                )
             self.check_string_literal(x, it)
         text = f"{x.text} {text_op} [" + ", ".join(i.text for i in items) + "]"
         return ir.InList(T.BOOL, span, text, False, x, items, negate)
@@ -1166,7 +1204,7 @@ class Checker:
                 "compare it first, e.g. `age(x) > 10min`",
             )
         for r in self.leaf_results(value):
-            self.check_result(r, writer, key)
+            self.check_result(r, writer, key, self.entity_state(entity_id))
         reads = self.reads(value)
         self.binding_reads[key] = reads
         machines: set[str] = set()
@@ -1219,14 +1257,16 @@ class Checker:
             hint += "; use an `on` action for anything else"
         self.fail(f"`{entity_id}` can't be driven", span, hint)
 
-    def check_result(self, r: ir.Node, writer: Writer, key: str) -> None:
+    def check_result(self, r: ir.Node, writer: Writer, key: str, state: EntityState | None) -> None:
         if r.type in (T.KEEP, T.ANY):
             return
-        if T.BOOL in writer.accepts and r.type in (T.TIMESTAMP, T.TIMEOFDAY, T.DURATION):
+        accepts, description = writer.accepts_for(state)
+        if T.BOOL in accepts and r.type in (T.TIMESTAMP, T.TIMEOFDAY, T.DURATION):
             self.want_bool(r, f"`{key}`")
-        if not any(assignable(r.type, t) for t in writer.accepts):
+        if not any(assignable(r.type, t) for t in accepts):
+            hint = self.as_percent_hint(r) if T.PERCENT in accepts and r.type == T.NUMBER else None
             self.fail(
-                f"`{key}` takes {writer.description}, but `{r.text}` is {article(r.type)}", r.span
+                f"`{key}` takes {description}, but `{r.text}` is {article(r.type)}", r.span, hint
             )
         if isinstance(r, ir.OnValue):
             spans = self._on_spans.get(id(r), {})
@@ -1244,8 +1284,11 @@ class Checker:
                     if leaf.type == T.ANY:
                         continue
                     if p.type == T.PERCENT and leaf.type != T.PERCENT:
-                        self.fail(f"`{name}` takes a percentage, e.g. `{name}: 50%`", leaf.span)
-                    if p.type == T.NUMBER and leaf.type not in NUMERIC:
+                        hint = self.as_percent_hint(leaf) if leaf.type == T.NUMBER else None
+                        self.fail(
+                            f"`{name}` takes a percentage, e.g. `{name}: 50%`", leaf.span, hint
+                        )
+                    if p.type == T.NUMBER and leaf.type != T.NUMBER:
                         self.fail(f"`{name}` takes a number", leaf.span)
         if isinstance(r, ir.Const) and r.type == T.STRING:
             allowed = writer.literal_values
