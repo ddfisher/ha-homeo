@@ -200,3 +200,29 @@ test("a `#` inside a string isn't a comment in a definition line", () => {
 test("now is a timestamp", () => {
   assert.equal(describe(Text.of(["let n = now"]), 8, HASS, NOW).info.kind, "timestamp");
 });
+
+test("multiline definitions show every line of the statement", () => {
+  const src = [
+    "let presence = latest   # aligned",
+    "    # a comment line",
+    "    motion -> on",
+    "",
+    "    else   -> off",
+    "state mode = \"auto\":",
+    "    fresh(remote.double) -> \"boost\"",
+    "let wrapped = max(",
+    "1, 2)",
+    "let y = presence or mode or wrapped",
+  ];
+  const doc = Text.of(src);
+  const hover = (name) => describe(doc, doc.toString().lastIndexOf(name), HASS, NOW).info.example;
+  assert.equal(hover("presence"), "let presence = latest\n    motion -> on\n    else   -> off");
+  assert.equal(hover("mode"), 'state mode = "auto":\n    fresh(remote.double) -> "boost"');
+  assert.equal(hover("wrapped"), "let wrapped = max(\n1, 2)"); // inside brackets, any indent
+  const brackets = Text.of(['let s = ")"  # (', "    + 1", "let t = s"]);
+  assert.equal(describe(brackets, brackets.toString().lastIndexOf("s"), HASS, NOW).info.example, 'let s = ")"\n    + 1');
+  const long = Text.of(["let big = latest", ...Array.from({ length: 20 }, (_, i) => `    a${i} -> ${i}`), "let z = big"]);
+  const shown = describe(long, long.toString().lastIndexOf("big"), HASS, NOW).info.example.split("\n");
+  assert.equal(shown.length, 13);
+  assert.equal(shown.at(-1), "    …");
+});

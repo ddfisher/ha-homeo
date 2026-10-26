@@ -137,13 +137,48 @@ export function withoutComment(lineText) {
   return lineText;
 }
 
-/** The `let` and `state` names this file defines, with each one's first line. */
+/** How much a line changes the bracket nesting (brackets in strings and comments don't count). */
+function bracketDelta(lineText) {
+  const stream = new StringStream(lineText, 4, 4);
+  const state = homeoStream.startState();
+  let delta = 0;
+  while (!stream.eol()) {
+    stream.start = stream.pos;
+    const style = homeoStream.token(stream, state);
+    if (stream.pos === stream.start) stream.next(); // never stall
+    if (style === null) {
+      const c = stream.current();
+      if (c === "(" || c === "[") delta++;
+      else if (c === ")" || c === "]") delta--;
+    }
+  }
+  return delta;
+}
+
+/** The most lines of a definition a hover shows. */
+const MAX_DEFINITION_LINES = 12;
+
+/** The `let` and `state` names this file defines, with each one's text: its first line and
+ * the lines that continue it (more-indented ones, or any inside open brackets, as in the
+ * lexer), without comments. */
 export function definitions(docText) {
   const out = Object.create(null); // keyed by names from the file: no `constructor` etc.
-  for (const m of docText.matchAll(/^(let|state)\s+([A-Za-z_]\w*)[^\n]*/gm)) {
-    // the first line, without a comment or the spaces that align `=` with neighbouring lines
-    const line = withoutComment(m[0]).trim().replace(/^(\S+\s+\w+)\s+=\s+/, "$1 = ");
-    out[m[2]] ??= { kind: m[1], line };
+  const lines = docText.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(let|state)[ \t]+([A-Za-z_]\w*)/.exec(lines[i]);
+    if (!m || out[m[2]]) continue;
+    // the first line, without the spaces that align `=` with neighbouring lines
+    const body = [withoutComment(lines[i]).trimEnd().replace(/^(\S+\s+\w+)\s+=\s*/, "$1 = ").trimEnd()];
+    let depth = Math.max(0, bracketDelta(lines[i]));
+    for (let j = i + 1; j < lines.length; j++) {
+      const text = withoutComment(lines[j]).trimEnd();
+      if (!text.trim()) continue; // blank or only a comment
+      if (depth === 0 && !/^\s/.test(text)) break; // the next statement
+      body.push(text);
+      depth = Math.max(0, depth + bracketDelta(text));
+    }
+    if (body.length > MAX_DEFINITION_LINES) body.splice(MAX_DEFINITION_LINES, Infinity, "    …");
+    out[m[2]] = { kind: m[1], line: body.join("\n") };
   }
   return out;
 }
