@@ -668,9 +668,16 @@ light.hall  := motion within 5min                # = motion or age(motion) < 5mi
 ```
 
 `for` and `within` are duals: `x for D` is "true throughout the last D", `x within D` is "true
-at some point in the last D" (true now, or until less than D ago). So `not (x within D)` is
-`(not x) for D`. Both take conditions only. For a timestamp (a button, `manual()`), write the
-`age` comparison: `age(input_button.boost) < 30min` for "pressed in the last 30 min".
+at some point in the last D" (true now, or until less than D ago). So `not (x within D)` means
+`(not x) for D`; the one difference is right after Homeo loads, when `not x` is a new expression
+whose change time is only known to be "before now", so `(not x) for D` first waits D (§17
+rule 2). Both take conditions only. For a timestamp (a button, `manual()`) or a time of day,
+write the `age` comparison: `age(input_button.boost) < 30min` for "pressed in the last 30 min".
+
+Two consequences of the expansion worth knowing:
+- if `x` becomes `unavailable` after turning off, `x within D` is `unknown` once D has passed,
+  so a light it drives is left as it is until the sensor is back (D16);
+- `on x within D:` fires when `x` turns on, but not again while the window is still open.
 
 Hysteresis needs no sugar; it's a `latest` block. Each condition counts from the moment it last
 *became* true, so between 700 and 800 the fan keeps whichever state it was last switched to:

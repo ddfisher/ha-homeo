@@ -422,7 +422,7 @@ one-line `summary`, the current result, for bindings the device's state, whether
 the last write, and per arm: the arm as written (with `let` names), its condition's value
 (`happened` for `latest` arms), whether it's the active one, and `values`: every non-constant
 subexpression with its current value, `let`s labelled by name and sugar expanded (`x for D`
-lists `age(x) >= D`). Values are JSON: bools and numbers as such; durations, times and
+lists `age(x) >= D`, `x within D` lists `age(x) < D`). Values are JSON: bools and numbers as such; durations, times and
 intervals as text ("12min", "08:01:00 (12min ago)", "at least 3min" for a change time from
 before a restart). Explaining evaluates at the current time and changes no runtime state. The
 optional diagnostic sensor per binding (§19) isn't built: the service covers the need without

@@ -49,6 +49,7 @@ test("for and within", () => {
     ["for", "keyword"],
     ["2min", "number"],
   ]);
+  assert.deepEqual(tokens("sensor.within"), [["sensor.within", "entity"]]);
 });
 
 test("literals and builtins", () => {

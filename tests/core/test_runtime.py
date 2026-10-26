@@ -139,6 +139,103 @@ def test_within_after_a_restart_waits_before_deciding():
     assert r.new_calls() == ["light.turn_off light.hall"]
 
 
+def test_within_retrigger_restarts_the_window():
+    r = Rig("light.hall := binary_sensor.hall_motion within 5min")
+    m = "binary_sensor.hall_motion"
+    r.h.advance(MIN)
+    r.h.set_state(m, "on")
+    r.h.set_state(m, "off")
+    r.new_calls()
+    r.h.advance(4 * MIN)
+    r.h.set_state(m, "on")
+    r.h.advance(10)
+    r.h.set_state(m, "off")
+    r.h.advance(5 * MIN - 1)  # 9 min after the first, < 5 min after the second
+    assert r.new_calls() == []
+    r.h.advance(1)
+    assert r.new_calls() == ["light.turn_off light.hall"]
+
+
+def test_within_true_at_a_restart():
+    r = Rig("light.hall := binary_sensor.hall_motion within 10min")
+    r.h.set_state("binary_sensor.hall_motion", "on")
+    r.new_calls()
+    r.restart(downtime=60)
+    assert r.h.states["light.hall"].state == "on"
+    r.h.set_state("binary_sensor.hall_motion", "off")
+    r.h.advance(10 * MIN)
+    assert r.new_calls() == ["light.turn_off light.hall"]
+
+
+def test_within_sensor_unavailable_after_turning_off():
+    # D16: once D has passed, `x or age(x) < D` with x unknown is unknown, so the light is
+    # left as it is until the sensor is back
+    r = Rig("light.hall := binary_sensor.hall_motion within 5min")
+    m = "binary_sensor.hall_motion"
+    r.h.advance(MIN)
+    r.h.set_state(m, "on")
+    r.h.set_state(m, "off")
+    r.h.set_state(m, "unavailable")
+    r.new_calls()
+    r.h.advance(10 * MIN)
+    assert r.new_calls() == []
+    r.h.set_state(m, "off")
+    assert r.new_calls() == ["light.turn_off light.hall"]
+
+
+def test_within_in_guards_latest_and_actions():
+    src = """
+let m = binary_sensor.hall_motion
+light.hall :=
+    m within 5min
+        | sensor.lux < 50   -> on(brightness: 40%)
+        | else              -> off
+    else                    -> off
+fan.bathroom := latest
+    m within 5min           -> on
+    input_button.boost      -> off
+on m within 5min:
+    notify.mobile_app_phone(message: "motion")
+"""
+    r = Rig(src)
+    m = "binary_sensor.hall_motion"
+    r.h.set_state("sensor.lux", "20")
+    r.h.advance(MIN)
+    r.new_calls()
+    r.h.set_state(m, "on")
+    assert sorted(r.new_calls()) == [
+        "light.turn_on light.hall brightness_pct=40",
+        "notify.mobile_app_phone message=motion",
+    ]
+    assert r.h.states["fan.bathroom"].state == "on"
+    r.h.advance(1)
+    r.h.press("input_button.boost")
+    assert r.new_calls() == ["fan.turn_off fan.bathroom"]
+    r.h.set_state(m, "off")
+    r.h.advance(MIN)
+    r.h.set_state(m, "on")  # the window never closed: `on` doesn't fire again
+    assert r.new_calls() == []
+    r.h.set_state(m, "off")
+    r.h.advance(5 * MIN)
+    assert r.new_calls() == ["light.turn_off light.hall"]
+
+
+def test_not_within_and_not_for_kept_apart():
+    # Found in review: these two used to share one history cell, so one got the other's result.
+    src = """
+let m = binary_sensor.hall_motion
+light.hall  := ((not m) within 5min) for 1min
+light.porch := (not (m within 5min)) for 1min
+"""
+    r = Rig(src)
+    m = "binary_sensor.hall_motion"
+    r.h.advance(20 * MIN)
+    r.h.set_state(m, "on")
+    r.h.advance(2 * MIN)
+    assert r.h.states["light.porch"].state == "off"  # motion: not (m within 5min) is false
+    assert r.h.states["light.hall"].state == "on"  # m was off until 2 min ago
+
+
 def test_coalesce_and_available():
     r = Rig("switch.pump := (sensor.bathroom_co2 ?? 0) > 800 or not available(sensor.lux)")
     r.h.set_state("sensor.lux", "unavailable")

@@ -495,7 +495,9 @@ class Checker:
                 return self.resolve_path(e, ctx)
             case A.Unary(op="not", operand=o):
                 x = self.want_bool(self.resolve(o, ctx), "`not`")
-                return ir.Not(T.BOOL, e.span, f"not {x.text}", False, x)
+                # `not (a or b)`, not `not a or b`: texts key history cells, so they must not
+                # read as a different expression
+                return ir.Not(T.BOOL, e.span, f"not {self.paren(x)}", False, x)
             case A.Unary(op="-", operand=o):
                 x = self.resolve(o, ctx)
                 if x.type not in (T.NUMBER, T.PERCENT, T.DURATION, T.ANY):
@@ -548,10 +550,13 @@ class Checker:
                 # D11: `x for D` = `x and age(x) >= D`; `x within D` = `x or age(x) < D`
                 within = isinstance(e, A.Within)
                 word = "within" if within else "for"
-                x = self.want_bool(
-                    self.resolve(o, ctx), f"`{word}`", self.sugar_timestamp_hint(o, d, within)
-                )
+                x = self.resolve(o, ctx)
+                if x.type in (T.TIMESTAMP, T.TIMEOFDAY):
+                    self.want_bool(x, f"`{word}`", self.sugar_age_hint(o, d, within))
+                x = self.want_bool(x, f"`{word}`")
                 dur = self.const_duration(self.resolve(d, ctx), f"`{word}`")
+                if dur.value.lo <= 0:
+                    self.fail(f"`{word}` needs a positive duration", d.span)
                 cell = self.history_cell(x, f"`{word}`")
                 read = ir.Read(T.BOOL, o.span, cell.text, False, cell)
                 age = ir.Age(T.DURATION, e.span, f"age({cell.text})", True, cell)
@@ -559,10 +564,11 @@ class Checker:
                 cmp = ir.Compare(
                     T.BOOL, e.span, f"age({cell.text}) {op} {dur.text}", False, op, age, dur
                 )
+                operand = f"({x.text})" if isinstance(x, ir.Not) else self.paren(x)
                 return ir.BoolOp(
                     T.BOOL,
                     e.span,
-                    f"{self.paren(x)} {word} {dur.text}",
+                    f"{operand} {word} {dur.text}",  # `(not m) within 5min` ≠ `not (m within …)`
                     False,
                     "or" if within else "and",
                     read,
@@ -608,20 +614,22 @@ class Checker:
             return f"({n.text})"
         return n.text
 
-    def want_bool(self, n: ir.Node, what: str, timestamp_hint: str | None = None) -> ir.Node:
+    def want_bool(self, n: ir.Node, what: str, age_hint: str | None = None) -> ir.Node:
+        """`age_hint` replaces the hint for a timestamp or time of day (`for`/`within`)."""
         if n.type in (T.BOOL, T.ANY):
             return n
         if n.type == T.TIMESTAMP:
             self.fail(
                 f"`{n.text}` is a timestamp, but {what} needs a condition",
                 n.span,
-                timestamp_hint or f"did you mean `age({n.text}) < 30min`?",
+                age_hint or f"did you mean `age({n.text}) < 30min`?",
             )
         if n.type == T.TIMEOFDAY:
             self.fail(
                 f"`{n.text}` is a time of day, but {what} needs a condition",
                 n.span,
-                f"did you mean `now >= {n.text}`, or `fresh({n.text})` in a state machine?",
+                age_hint
+                or f"did you mean `now >= {n.text}`, or `fresh({n.text})` in a state machine?",
             )
         if n.type == T.DURATION:
             self.fail(
@@ -633,9 +641,12 @@ class Checker:
         raise AssertionError
 
     @staticmethod
-    def sugar_timestamp_hint(operand: A.Expr, duration: A.Expr, within: bool) -> str:
-        """`for`/`within` take conditions; for a timestamp (a button, `manual()`), say what to
-        write instead, with the duration as written."""
+    def sugar_age_hint(operand: A.Expr, duration: A.Expr, within: bool) -> str | None:
+        """`for`/`within` take conditions; for a timestamp (a button, `manual()`) or a time of
+        day, say which `age` comparison to write instead, with the given duration. Only for a
+        duration literal: anything else wouldn't make a valid suggestion."""
+        if not isinstance(duration, A.DurationLit):
+            return None
         x, d = to_source(operand), to_source(duration)
         recent = f"`age({x}) < {d}` for 'happened in the last {d}'"
         if within:

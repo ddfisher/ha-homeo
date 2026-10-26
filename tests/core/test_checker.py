@@ -258,6 +258,25 @@ def test_within_expansion(host):
     assert e.right.text == "age(binary_sensor.hall_motion) < 5min"
 
 
+def test_not_keeps_its_parentheses_in_texts(host):
+    # Texts key history cells: `(not m) within 5min` and `not (m within 5min)` mean different
+    # things, so they must not share one (found in review).
+    p = ok(
+        host,
+        """
+let m = binary_sensor.hall_motion
+light.hall  := ((not m) within 5min) for 1min
+light.porch := (not (m within 5min)) for 1min
+switch.pump := not (m or binary_sensor.bathroom_window)
+""",
+    )
+    hall, porch, pump = (b.expr for b in p.bindings)
+    assert hall.text == "((not binary_sensor.hall_motion) within 5min) for 1min"
+    assert porch.text == "(not (binary_sensor.hall_motion within 5min)) for 1min"
+    assert pump.text == "not (binary_sensor.hall_motion or binary_sensor.bathroom_window)"
+    assert hall.right.left.cell is not porch.right.left.cell
+
+
 def test_for_and_within_take_conditions(host):
     d = err(host, "light.porch := input_button.boost for 5min")
     assert d.message == "`input_button.boost` is a timestamp, but `for` needs a condition"
@@ -272,6 +291,15 @@ def test_for_and_within_take_conditions(host):
     assert d.message == "`within` needs a condition, but `sensor.lux` is a number"
     d = err(host, "light.porch := binary_sensor.hall_motion within sensor.lux")
     assert "`within` needs a fixed duration" in d.message
+    # a time of day: `age` of its last occurrence
+    d = err(host, "light.porch := sunset within 30min")
+    assert d.hint == "use `age(sunset) < 30min` for 'happened in the last 30min'"
+    # without a duration literal there's no valid suggestion to make with it
+    d = err(host, "light.porch := input_button.boost within sensor.lux")
+    assert "sensor.lux" not in (d.hint or "")
+    for src in ("within 0s", "within -5min", "for 0s"):
+        d = err(host, f"light.porch := binary_sensor.hall_motion {src}")
+        assert d.message.endswith("needs a positive duration"), src
 
 
 def test_for_expansion(host):

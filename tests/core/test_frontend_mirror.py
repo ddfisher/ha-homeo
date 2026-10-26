@@ -14,6 +14,15 @@ def test_keywords_match_the_lexer():
     js = LANGUAGE_JS.read_text()
     block = re.search(r"export const KEYWORDS = \[(.*?)\];", js, re.S).group(1)
     assert set(re.findall(r'"(\w+)"', block)) == set(KEYWORDS)
+    # and every keyword is highlighted as one (control word) or as a value (`on`, `keep`, …)
+    styled: set[str] = set()
+    for name in ("CONTROL", "ATOMS"):
+        styled |= set(
+            re.findall(
+                r'"(\w+)"', re.search(rf"const {name} = new Set\(\[(.*?)\]\)", js, re.S).group(1)
+            )
+        )
+    assert set(KEYWORDS) <= styled
 
 
 def test_on_settings_match_the_writers():
