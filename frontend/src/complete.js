@@ -48,7 +48,7 @@ function localNames(doc) {
 
 /** `let` names that are plain aliases of an entity: `let remote = event.bathroom_remote`. */
 export function aliases(doc) {
-  const out = {};
+  const out = Object.create(null); // keyed by names from the file: no `constructor` etc.
   for (const m of doc.matchAll(/^let\s+([A-Za-z_]\w*)\s*=\s*([a-z_]\w*\.\w+)\s*(?:#.*)?$/gm)) {
     out[m[1]] = m[2];
   }

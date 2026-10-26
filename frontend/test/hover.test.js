@@ -73,7 +73,7 @@ test("builtin functions, names and keywords", () => {
   assert.equal(at(7, "keep").info.title, "keep");
   assert.equal(at(8, "on").info.kind, "action");
   assert.equal(at(8, "if").info.kind, "keyword");
-  assert.equal(at(8, "now").info.kind, "time of day");
+  assert.equal(at(8, "now").info.kind, "timestamp");
   assert.equal(at(8, "in").info.title, "x in a..b");
   assert.equal(at(8, "..").info.kind, "range");
   // a range bound written right before `..` is a day or solar time, not an entity
@@ -178,4 +178,25 @@ test("formatting", () => {
   assert.match(html, /<code>age\(x\)<\/code> <span class="hover-kind">function<\/span>/);
   assert.match(html, /Use <code>x<\/code> &#60;here&#62;/);
   assert.match(html, /<span class="hover-val">&#60;b&#62;<\/span>/);
+});
+
+test("names from the file never match object prototype keys", () => {
+  for (const name of ["constructor", "toString", "__proto__"]) {
+    const doc = Text.of([`let x = ${name}`]);
+    assert.equal(describe(doc, 9, HASS, NOW), null, name); // not defined here: no hover
+    const dotted = Text.of([`let x = ${name}.y`]);
+    assert.doesNotThrow(() => describe(dotted, 9, HASS, NOW), name);
+  }
+  const attr = describe(Text.of(["let b = light.hall.constructor"]), 9, HASS, NOW).info;
+  assert.match(attr.note, /has no attribute `constructor`/);
+});
+
+test("a `#` inside a string isn't a comment in a definition line", () => {
+  const doc = Text.of(['let msg = "room #1"  # the sign', "let y = msg"]);
+  const d = describe(doc, doc.toString().lastIndexOf("msg"), HASS, NOW);
+  assert.equal(d.info.example, 'let msg = "room #1"');
+});
+
+test("now is a timestamp", () => {
+  assert.equal(describe(Text.of(["let n = now"]), 8, HASS, NOW).info.kind, "timestamp");
 });
