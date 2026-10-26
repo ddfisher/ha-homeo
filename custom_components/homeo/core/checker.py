@@ -622,9 +622,19 @@ class Checker:
         return f"use {recent}, or `age({x}) >= {d}` for 'hasn't happened for {d}'"
 
     def const_duration(self, n: ir.Node, what: str) -> ir.Const:
+        if isinstance(n, ir.Arith) and n.type == T.DURATION and self.all_constants(n):
+            # constants that didn't fold: a division by zero somewhere
+            self.fail(f"`{n.brief}` divides by zero, so {what} has no duration", n.span)
         if not isinstance(n, ir.Const) or n.type != T.DURATION:
             self.fail(f"{what} needs a fixed duration like `5min`", n.span)
         return n
+
+    @classmethod
+    def all_constants(cls, n: ir.Node) -> bool:
+        """Arithmetic over constants only (folded, unless it divides by zero)."""
+        if isinstance(n, (ir.Arith, ir.Neg)):
+            return all(cls.all_constants(c) for c in ir.children(n))
+        return isinstance(n, ir.Const)
 
     def history_cell(self, n: ir.Node, what: str) -> ir.CellDef:
         """The cell tracking `n`'s history (for age, for, latest, on, previous, ...)."""
@@ -701,7 +711,8 @@ class Checker:
                 "*": lambda: num_mul(a.value, b.value),
                 "/": lambda: num_div(a.value, b.value),
             }[op]()
-            return ir.Const(result, span, False, value)
+            if isinstance(value, Num):  # not a division by zero, which stays as written
+                return ir.Const(result, span, False, value)
         return ir.Arith(result, span, a.moving or b.moving, op, a, b)
 
     def percent_order_hint(self, n: ir.Node) -> str | None:

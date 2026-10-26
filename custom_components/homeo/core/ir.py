@@ -390,8 +390,9 @@ class Program:
 # ----------------------------------------------------------------------- helpers
 
 # Fields that only describe how a node was written or displayed, or that follow from its
-# other fields, not what it computes.
-_DISPLAY_ONLY = frozenset({"span", "moving", "source", "cond_source", "implicit", "label"})
+# other fields, not what it computes. (An `Error`'s `label` isn't one: it's the failed `let`
+# it stands for, so two failed lets don't share a cell and its messages.)
+_DISPLAY_ONLY = frozenset({"span", "moving", "source", "cond_source", "implicit"})
 
 
 def structure(x: Any) -> str:
@@ -688,6 +689,11 @@ def arm_cells(a: ArmIR | GroupIR) -> list[CellDef]:
     for n in arm_nodes(a):
         out.extend(node_cells(n))
     return out
+
+
+def is_constant(n: Node) -> bool:
+    """A constant, or a constant scaled (`50%` against a brightness), so it has no inputs."""
+    return isinstance(n, Const) or (isinstance(n, Scale) and is_constant(n.operand))
 
 
 def uses_now(n: Node) -> bool:

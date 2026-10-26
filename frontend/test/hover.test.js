@@ -5,7 +5,7 @@ import { Text } from "@codemirror/state";
 
 import { DOCS, docText } from "../src/docs.js";
 import { describe, fmtDuration, fmtInstant, hoverHtml, tokenAt, valueRows } from "../src/hover.js";
-import { BUILTINS, FUNCTIONS } from "../src/language.js";
+import { BUILTINS, FUNCTIONS, KEYWORDS } from "../src/language.js";
 
 const NOW = new Date(2026, 0, 5, 8, 10, 0); // local time, so the tests don't depend on the zone
 
@@ -95,9 +95,9 @@ test("common words have no hover", () => {
 
 test("every builtin and keyword the editor knows has docs", () => {
   for (const name of [...FUNCTIONS, ...BUILTINS]) assert.ok(DOCS[name], name);
-  for (const name of ["for", "latest", "every", "keep", "let", "state", "on", "in", "if", "else"]) {
-    assert.ok(DOCS[name], name);
-  }
+  // every keyword but the common words, which have no hover (above)
+  const common = ["and", "or", "not", "true", "false", "off"];
+  for (const name of KEYWORDS.filter((k) => !common.includes(k))) assert.ok(DOCS[name], name);
   assert.match(docText(DOCS.age), /^age\(x\)\n\nHow long since x last changed/);
 });
 

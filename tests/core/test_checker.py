@@ -494,6 +494,25 @@ def test_texts_parse_back_to_the_same_structure(host, src):
     assert ir.structure(again) == ir.structure(e), e.text
 
 
+@pytest.mark.parametrize("word", ["for", "within"])
+def test_a_duration_that_divides_by_zero_is_an_error(host, word):
+    # It used to fold to an unknown constant and crash the positive-duration check (found in
+    # review). Elsewhere a constant division by zero stays as written, and is unknown.
+    d = err(host, f"light.porch := binary_sensor.hall_motion {word} 5min / 0")
+    assert d.message == f"`5min / 0` divides by zero, so `{word}` has no duration"
+    p = ok(host, "switch.pump := sensor.lux > 1 / 0")
+    assert p.bindings[0].expr.text == "sensor.lux > 1 / 0"
+
+
+def test_failed_lets_dont_share_a_history_cell(host):
+    # Each stands for its own `let`, so messages name the right one (found in review).
+    ds = errs(
+        host,
+        "let a = nosuch.x\nlet b = nosuch.y\nlight.porch := age(a) > 5min\nlight.hall := age(b)\n",
+    )
+    assert ds[-1].message == "`age(b)` is a duration, but `light.hall` needs a condition"
+
+
 def test_history_cell_keys_stay_short_when_nested(host):
     # A cell's structure includes the keys of the cells it reads (twice in `for`/`within`).
     src = "binary_sensor.hall_motion"

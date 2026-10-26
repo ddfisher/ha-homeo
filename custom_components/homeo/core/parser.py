@@ -386,7 +386,7 @@ class Parser:
         """`x for D` and `x within D` (D11): one precedence level, between `not` and
         comparisons."""
         left = self.parse_comparison()
-        while self.check_kw("for") or self.check_kw("within"):
+        while self.check_kw("for", "within"):
             sugar = A.For if self.advance().value == "for" else A.Within
             dur = self.parse_coalesce()
             left = sugar(left.span.to(dur.span), left, dur)

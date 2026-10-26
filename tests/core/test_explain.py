@@ -245,6 +245,14 @@ fan.bathroom := co2 > 800 and not night and day
     assert one(r, "day")["values"] == {"today": "mon"}
 
 
+def test_a_scaled_percentage_isnt_listed_as_a_value():
+    # `50%` against a brightness is a constant scaled to 0–255; listing it would say that 50%
+    # "is" 127.5 (found in review).
+    r = Rig("light.porch :=\n    light.hall.brightness > 50% -> on\n    else -> off\n")
+    (e,) = explain(r.rt, "light.porch")
+    assert list(e["arms"][0]["values"]) == ["light.hall.brightness"]
+
+
 def test_within_shows_its_expansion():
     r = Rig("light.hall := binary_sensor.hall_motion within 5min\n")
     r.h.advance(MIN)

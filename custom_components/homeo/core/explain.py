@@ -366,7 +366,7 @@ class _Explainer:
         return out
 
     def _visit(self, n: ir.Node, include: bool, out: dict[str, Any], seen: set[int]) -> None:
-        if id(n) in seen or isinstance(n, ir.Const):
+        if id(n) in seen or ir.is_constant(n):
             return
         seen.add(id(n))
         if include:
